@@ -1,0 +1,6 @@
+jupyter
+jupyterlab==3.0.4
+monai==0.5
+tqdm
+nibabel
+ortools
