@@ -6,7 +6,23 @@ import torch.nn.functional as F
 from rand_bias_field import RandomBiasFieldLayer
 from rand_kspace import RandomKSpaceLayer
 from rand_hist_norm import RandomHistNormLayer
+import torchvision
 
+def save_images(writer, images, iteration, name, normalize=True, sigmoid=False, k=3,
+                    tensorboard=True, png=False):
+        if normalize:
+            images = (images - images.min()) / (images.max() - images.min())
+        if sigmoid:
+            images = torch.sigmoid(images)
+        images = torch.rot90(images, k=k, dims=[-2, -1])
+        grid = torchvision.utils.make_grid(images)
+        if tensorboard:
+            writer.add_image(name, grid, iteration)
+        if png:
+            torchvision.utils.save_image(tensor=grid,
+                                         fp=os.path.join(writer.log_dir, f"{name}_{iteration}.png"),
+                                         format='png'
+                                        )
 
 def soft_dice(seg, target, n_labels):
     ov_dice = np.zeros(n_labels)
