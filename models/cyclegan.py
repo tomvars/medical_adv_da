@@ -5,7 +5,8 @@ import torch.optim as optim
 import sys
 import os
 sys.path.append('../')
-from networks import Destilation_student_matchingInstance, SplitHeadModel, DiscriminatorCycleGANSimple
+from networks import Destilation_student_matchingInstance, SplitHeadModel,\
+DiscriminatorCycleGANSimple, GeneratorUnet
 from utils import to_var_gpu, save_images
 
 class CycleganModel(BaseModel):
@@ -34,7 +35,7 @@ class CycleganModel(BaseModel):
         self.optimizer_generator = optim.Adam(
             itertools.chain(self.generator_s_t.parameters(), self.generator_t_s.parameters()),
             lr=1e-4)
-        self.scheduler_S = optim.lr_scheduler.MultiStepLR(optimizer_generator, milestones=[20000, 20000], gamma=0.1)
+        self.scheduler = optim.lr_scheduler.MultiStepLR(self.optimizer_generator, milestones=[20000, 20000], gamma=0.1)
         self.criterion_cycle = torch.nn.L1Loss()
         self.gan_loss = torch.nn.CrossEntropyLoss()
         self.spatial_discriminator_loss = torch.nn.MSELoss()
@@ -206,8 +207,6 @@ class CycleganModel(BaseModel):
         tensorboard_dict = {
             'source_inputs': source_inputs,
             'target_inputs': target_inputs,
-            'outputs': outputs,
-            'outputs2': outputs2,
             'tumour_labels': tumour_labels,
             'cochlea_labels': cochlea_labels
         }
@@ -293,14 +292,6 @@ class CycleganModel(BaseModel):
                                    iteration=self.iterations, name='source_inputs/{}'.format(split))
         save_images(writer=self.writer, images=tensorboard_dict['target_inputs'], normalize=True,
                     sigmoid=False, png=False, iteration=iteration, name='targets_inputs/{}'.format(split))
-        save_images(writer=self.writer, images=tensorboard_dict['outputs'], normalize=False, sigmoid=True,
-                               iteration=self.iterations, name='outputs_source_tumour/{}'.format(split), png=False)
-        save_images(writer=self.writer, images=tensorboard_dict['outputs2'], normalize=False, sigmoid=True,
-                               iteration=self.iterations, name='outputs_source_cochlea/{}'.format(split), png=False)
-        save_images(writer=self.writer, images=tensorboard_dict['tumour_labels'], normalize=True, sigmoid=False,
-                               iteration=self.iterations, name='tumour_labels/{}'.format(split), png=False)
-        save_images(writer=self.writer, images=tensorboard_dict['cochlea_labels'], normalize=True, sigmoid=False,
-                               iteration=self.iterations, name='cochlea_labels/{}'.format(split), png=False)
         for key, value in postfix_dict.items():
             self.writer.add_scalar('{}/{}'.format(key, split), value, self.iterations)
             
