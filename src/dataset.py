@@ -19,6 +19,7 @@ from monai.transforms import (LoadImaged,
                               SpatialCropd,
                               BatchInverseTransform
                              )
+import ants
 
 
 class SliceDataset(Dataset):
@@ -555,8 +556,38 @@ def infer_on_subject(model, output_path, whole_volume_path, files_df, subject_id
     img = nib.load(whole_volume_path)
     for idx, batch in enumerate(inference_dl):
         # Need to run inference here
-        final_output.append(np.stack([f['inputs'] for f in inverse_op(batch)]))
-        print(final_output[0].shape)
+        outputs, outputs2 = model.inference_func(batch['inputs'].to(model.device))
+        tumour_preds = (torch.sigmoid(outputs) > 0.5).float().detach().cpu()
+        cochlea_preds = (torch.sigmoid(outputs2) > 0.5).float().detach().cpu() * 2.0
+        batch['inputs'] = torch.clamp(tumour_preds + cochlea_preds, min=0, max=2) # hack
+        final_output.append(np.stack(
+            [f['inputs'] for f in inverse_op(batch)]
+        ))
     volume = np.einsum('ijkl->jkli', np.concatenate(final_output))[:, ::-1, ::-1, ...]
-    nifti_saver = NiftiSaver(output_dir = Path(output_path).parent)
-    nifti_saver.save(volume, meta_data={'affine': img.affine, 'filename_or_obj': output_path})
+    nifti_saver = NiftiSaver(output_dir = Path(output_path).parent / 'mni_preds')
+    print(Path(output_path).parent / 'mni_preds')
+    print(Path(output_path).parent)
+    print(Path(output_path).name)
+    nifti_saver.save(volume, meta_data={'affine': img.affine, 'filename_or_obj': Path(output_path).name})
+    # Now save it in the original space
+    seg_path = str(Path(output_path).parent / 'mni_preds'/ subject_id / f"{subject_id}_seg.nii.gz")
+    img_path = whole_volume_path
+    orig_img_path = whole_volume_path.replace('FLAIR_', 'orig_FLAIR_')
+    orig_img = ants.image_read(orig_img_path)
+    img = ants.image_read(img_path)
+    seg = ants.image_read(seg_path)
+    resampled_img = ants.resample_image_to_target(image=img, target=orig_img, interp_type='linear')
+    resampled_seg = ants.resample_image_to_target(image=seg, target=orig_img, interp_type='nearestNeighbor')
+    transforms = ants.registration(fixed=orig_img, moving=resampled_img, type_of_transform='Affine')
+    transformed_seg = ants.apply_transforms(fixed=orig_img, moving=resampled_seg,
+                                            transformlist=transforms['fwdtransforms'], interpolator='nearestNeighbor')
+    transformed_img = ants.apply_transforms(fixed=orig_img, moving=resampled_img,
+                                            transformlist=transforms['fwdtransforms'], interpolator='linear')
+    subject_id = subject_id.split('_')[-1]
+    submission_filename = f"crossmoda_{subject_id}_Label.nii.gz"
+    output_path = Path(output_path).parent / 'submission_folder'
+    output_path.mkdir(parents=True, exist_ok=True)
+    if not (output_path / submission_filename).exists():
+        transformed_seg.to_file(str(output_path / submission_filename))
+    else:
+        'File at {} already exists'.format(str(output_path / submission_filename))

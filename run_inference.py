@@ -47,81 +47,9 @@ from src.ada import ADAModel
 from src.icmsc import ICMSCModel
 from src.cycada import CycadaModel
 
-
-
-def train(args, model, 
-          source_train_slice_dataset, source_val_dataset, source_test_dataset,
-          target_train_slice_dataset, source_val_slice_dataset, target_val_slice_dataset,
-          target_val_dataset, target_test_dataset):
-    source_dl = loop_iterable(torch.utils.data.DataLoader(source_train_slice_dataset,
-                                                          batch_size=args.batch_size, shuffle=True))
-    target_dl = loop_iterable(torch.utils.data.DataLoader(target_train_slice_dataset,
-                                                          batch_size=args.batch_size, shuffle=True))
-    source_val_slice_dl = loop_iterable(torch.utils.data.DataLoader(source_val_slice_dataset,
-                                                                    batch_size=args.batch_size, shuffle=True))
-    target_val_slice_dl = loop_iterable(torch.utils.data.DataLoader(target_val_slice_dataset,
-                                                                    batch_size=args.batch_size, shuffle=True))
-    
-    epoch = -1
-    iteration = 0
-    is_training = True
-    model.initialise()
-    try:
-        while is_training:
-            epoch += 1
-            start_time = time.time()
-            train_mini_batch_indices = np.arange(0, len(source_train_slice_dataset), args.batch_size)
-            torch.manual_seed(epoch)
-            model.epoch_reset()
-            # Training loop
-            with tqdm(total=len(train_mini_batch_indices), file=sys.stdout) as pbar:
-                for indb, _ in enumerate(train_mini_batch_indices):                   
-                    pbar.update(1)
-                    iteration = epoch * len(train_mini_batch_indices) + indb
-                    model.iterations = iteration
-                    postfix_dict, tensorboard_dict = model.training_loop(source_dl, target_dl)
-                    pbar.set_postfix(postfix_dict)
-                    if iteration % args.tensorboard_every_n == 0:
-                        model.tensorboard_logging(postfix_dict=postfix_dict, tensorboard_dict=tensorboard_dict, split='train')
-                    if iteration % args.save_every_n == 0:
-                        model.save()
-                    if iteration >= args.iterations:
-                        print('Training ending!')
-                        print('SAVING MODEL')
-                        model.save()
-                        is_training = False
-                        break
-            # Validation loop
-            print('Validation!')
-            val_mini_batch_indices = np.arange(0, len(source_val_slice_dataset), args.batch_size)
-            running_postfix_dict  = {}
-            model.epoch_reset()
-            with tqdm(total=len(val_mini_batch_indices), file=sys.stdout) as pbar:
-                for indb, _ in enumerate(val_mini_batch_indices):
-                    pbar.update(1)
-                    postfix_dict, tensorboard_dict = model.validation_loop(source_dl, target_dl)
-                    if not running_postfix_dict:
-                        running_postfix_dict = postfix_dict
-                    else:
-                        # Update postfix dict using moving average formula
-                        for key, postfix_value in postfix_dict.items():
-                            running_postfix_dict[key] = (postfix_value + indb*running_postfix_dict[key] )/ (indb + 1)
-                    pbar.set_postfix(running_postfix_dict)
-            model.tensorboard_logging(postfix_dict=running_postfix_dict,
-                                      tensorboard_dict=tensorboard_dict, split='val')
-            end_time = time.time()
-            time_epoch = (end_time - start_time) / 60
-            print('Time: {}'.format(time_epoch))
-    except KeyboardInterrupt:
-        print('Interrupted training at iteration {}'.format(iteration))
-        print('SAVING MODEL')
-        model.save()
-    model.writer.close()
-
 def infer(args, model, inference_dir):
     dataset_split_df = pd.read_csv(args.inference_split, names=['subject_id', 'split'])
-#     data_dir = ms_path[os.uname().nodename][args.target] # Target data
-    data_dir = '/data2/tom/crossmoda/target_validation/slices'
+    data_dir = ms_path[os.uname().nodename][args.target] # Target data
     flair_filenames = os.listdir(os.path.join(data_dir, 'flair'))
     subject_ids = [x.split('_slice')[0] for x in flair_filenames]
     slice_idx_arr = [int(x.split('_')[3].replace('.nii.gz', '')) for x in flair_filenames]
@@ -138,7 +66,7 @@ def infer(args, model, inference_dir):
         for subject_id in subject_ids:
             output_path = str(Path(inference_dir) / subject_id)
             print(output_path)
-            whole_volume_path = str(Path(data_dir).parent / 'whole' / 'flair' / (subject_id + '.nii.gz'))
+            whole_volume_path = str(Path(ms_path[os.uname().nodename][args.target]).parent / 'whole' / 'flair' / (subject_id + '.nii.gz'))
             print(whole_volume_path)
             infer_on_subject(model, output_path, whole_volume_path, files_df, subject_id, batch_size=10)
             pbar.update(1)
@@ -157,37 +85,7 @@ def main(args):
     model_factory = {'cyclegan': CycleganModel, 'ada': ADAModel, 'mean_teacher': MeanTeacherModel,
                      'supervised_joint': SupervisedJointModel, 'supervised': SupervisedModel,
                      'icmsc': ICMSCModel, 'cycada': CycadaModel}
-    slice_dataset = {'ms': SliceDataset, 'crossmoda': get_monai_slice_dataset, 'tumour': SliceDatasetTumour}[args.task]
-    whole_volume_dataset = {'ms': WholeVolumeDataset, 'crossmoda': WholeVolumeDataset, 'tumour': WholeVolumeDatasetTumour}[args.task]
-    source_train_slice_dataset = slice_dataset(ms_path[os.uname().nodename][args.source],
-                                         exclude_slices = list(range(70,192)) + list(range(20)),
-                                         paddtarget=args.paddtarget, split='train', tumour_only=bool(args.tumour_only),
-                                         slice_selection_method='mask', dataset_split_csv=args.source_split)
-    source_val_slice_dataset = slice_dataset(ms_path[os.uname().nodename][args.source],
-                                         paddtarget=args.paddtarget, split='val', tumour_only=bool(args.tumour_only),
-                                         slice_selection_method='mask', dataset_split_csv=args.source_split)
-    source_val_dataset = whole_volume_dataset(ms_path[os.uname().nodename][args.source + '_whole'], split='val',
-                                              tumour_only=bool(args.tumour_only), paddtarget=args.paddtarget,
-                                              dataset_split_csv=args.source_split)
-    source_test_dataset = whole_volume_dataset(ms_path[os.uname().nodename][args.source + '_whole'], split='test',
-                                               tumour_only=bool(args.tumour_only), paddtarget=args.paddtarget,
-                                               dataset_split_csv=args.source_split)
-    target_train_slice_dataset = slice_dataset(ms_path[os.uname().nodename][args.target],
-                                         paddtarget=args.paddtarget, split='train',
-                                         exclude_slices = list(range(70,192)) + list(range(20)),
-                                         slice_selection_method='mask', dataset_split_csv=args.target_split)
-    target_val_slice_dataset = slice_dataset(ms_path[os.uname().nodename][args.target],
-                                             paddtarget=args.paddtarget, split='val',
-                                             slice_selection_method='mask', dataset_split_csv=args.target_split)
-    target_train_whole_vol_dataset = whole_volume_dataset(ms_path[os.uname().nodename][args.target + '_whole'],
-                                                          split='train', paddtarget=args.paddtarget,
-                                                          dataset_split_csv=args.target_split)
-    target_val_dataset = whole_volume_dataset(ms_path[os.uname().nodename][args.target + '_whole'], split='val',
-                                              paddtarget=args.paddtarget,
-                                              dataset_split_csv=args.target_split)
     writer = SummaryWriter(tensorboard_folder+'/{}/{}_{}'.format(args.task, band, args.tag))
-    inference_func = {'ms': inference_ms, 'tumour': inference_tumour, 'crossmoda': inference_crossmoda}[args.task]
-#     save_images = partial(save_images, k=1 if args.task == 'tumour' else 3)
     model = model_factory[args.method](cf=args, writer=writer, models_folder=models_folder,
                                        results_folder=results_folder, tensorboard_folder=tensorboard_folder, run_name=run_name)
     if args.checkpoint != "null":
@@ -197,11 +95,7 @@ def main(args):
     if args.infer:
         infer(args=args, model=model, inference_dir=os.path.join(inference_folder, run_name))
     else:
-        train(args=args, model=model, source_val_slice_dataset=source_val_slice_dataset, target_val_slice_dataset=target_val_slice_dataset,
-              source_train_slice_dataset=source_train_slice_dataset,
-              target_train_slice_dataset=target_train_slice_dataset,
-              source_test_dataset=source_test_dataset, target_test_dataset=target_train_whole_vol_dataset,  # hack
-              source_val_dataset=source_val_dataset, target_val_dataset=target_val_dataset)
+        raise Exception('This is the inference script!')
 
 if __name__ == '__main__':
     # Parameters

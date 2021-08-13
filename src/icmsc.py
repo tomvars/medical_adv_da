@@ -385,6 +385,11 @@ class ICMSCModel(BaseModel):
         }
         return postfix_dict, tensorboard_dict
     
+    def inference_func(self, inputs):
+        # This function should output the right function for inference
+        outputs, outputs2, _, _, _, _, _, _, _, _, _  = self.seg_model_target(inputs)
+        return outputs, outputs2
+    
     def tensorboard_logging(self, postfix_dict, tensorboard_dict, split='train'):
         save_images(writer=self.writer, images=tensorboard_dict['tumour_labels'], normalize=True,
                     sigmoid=False, png=False, iteration=self.iterations, name='tumour_labels/{}'.format(split))

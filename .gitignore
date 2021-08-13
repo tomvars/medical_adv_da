@@ -5,7 +5,9 @@ __pycache__/
 *.ipynb
 # C extensions
 *.so
+*.nii.gz
 
+UniRes/*
 # Distribution / packaging
 .Python
 build/
