@@ -1,15 +1,14 @@
 import multiprocessing
 import os
 import sys
-sys.path.append('../')
 import torch
 import torch.optim as optim
 import numpy as np
 from functools import partial
-from .base_model import BaseModel
-from networks import Destilation_student_matchingInstance, SplitHeadModel
-from utils import save_images
-from utils import bland_altman_loss, dice_soft_loss, ss_loss, generate_affine, non_geometric_augmentations, apply_transform
+from src.base_model import BaseModel
+from src.networks import Destilation_student_matchingInstance, SplitHeadModel
+from src.utils import save_images
+from src.utils import bland_altman_loss, dice_soft_loss, ss_loss, generate_affine, non_geometric_augmentations, apply_transform
 
 class SupervisedModel(BaseModel):
     def __init__(self, cf, writer, results_folder, models_folder, tensorboard_folder,

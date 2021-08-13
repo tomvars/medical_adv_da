@@ -4,7 +4,7 @@ import torch
 from functools import partial
 from collections import defaultdict
 from pairwise_measures import PairwiseMeasures
-from utils import apply_transform, non_geometric_augmentations, generate_affine, to_var_gpu, batch_adaptation, soft_dice
+from src.utils import apply_transform, non_geometric_augmentations, generate_affine, to_var_gpu, batch_adaptation, soft_dice
 
 def evaluate(args, preds, targets, prefix,
              metrics=['dice', 'jaccard', 'sensitivity', 'specificity', 'soft_dice',

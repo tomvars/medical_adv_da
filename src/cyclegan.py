@@ -4,10 +4,9 @@ from .base_model import BaseModel
 import torch.optim as optim
 import sys
 import os
-sys.path.append('../')
-from networks import Destilation_student_matchingInstance, SplitHeadModel,\
+from src.networks import Destilation_student_matchingInstance, SplitHeadModel,\
 DiscriminatorCycleGANSimple, GeneratorUnet
-from utils import to_var_gpu, save_images
+from src.utils import to_var_gpu, save_images
 
 class CycleganModel(BaseModel):
     def __init__(self, cf, writer, results_folder, models_folder, tensorboard_folder,
@@ -207,8 +206,10 @@ class CycleganModel(BaseModel):
         tensorboard_dict = {
             'source_inputs': source_inputs,
             'target_inputs': target_inputs,
-            'tumour_labels': tumour_labels,
-            'cochlea_labels': cochlea_labels
+            'generated_target': generated_target,
+            'generated_source': generated_source,
+            'cycle_source': cycle_source,
+            'cycle_target': cycle_target
         }
         return postfix_dict, tensorboard_dict
     
@@ -279,10 +280,10 @@ class CycleganModel(BaseModel):
         tensorboard_dict = {
             'source_inputs': source_inputs,
             'target_inputs': target_inputs,
-            'outputs': outputs,
-            'outputs2': outputs2,
-            'tumour_labels': tumour_labels,
-            'cochlea_labels': cochlea_labels
+            'generated_target': generated_target,
+            'generated_source': generated_source,
+            'cycle_source': cycle_source,
+            'cycle_target': cycle_target
         }
         return postfix_dict, tensorboard_dict
     
@@ -291,19 +292,31 @@ class CycleganModel(BaseModel):
                                    sigmoid=False, png=False,
                                    iteration=self.iterations, name='source_inputs/{}'.format(split))
         save_images(writer=self.writer, images=tensorboard_dict['target_inputs'], normalize=True,
-                    sigmoid=False, png=False, iteration=iteration, name='targets_inputs/{}'.format(split))
+                    sigmoid=False, png=False, iteration=self.iterations, name='targets_inputs/{}'.format(split))
+        save_images(writer=self.writer, images=tensorboard_dict['generated_target'], normalize=True,
+                    sigmoid=False, png=False, iteration=self.iterations, name='generated_target/{}'.format(split))
+        save_images(writer=self.writer, images=tensorboard_dict['generated_source'], normalize=True,
+                    sigmoid=False, png=False, iteration=self.iterations, name='generated_source/{}'.format(split))
+        save_images(writer=self.writer, images=tensorboard_dict['cycle_source'], normalize=True,
+                    sigmoid=False, png=False, iteration=self.iterations, name='cycle_source/{}'.format(split))
+        save_images(writer=self.writer, images=tensorboard_dict['cycle_target'], normalize=True,
+                    sigmoid=False, png=False, iteration=self.iterations, name='cycle_target/{}'.format(split))
         for key, value in postfix_dict.items():
             self.writer.add_scalar('{}/{}'.format(key, split), value, self.iterations)
             
     def load(self, checkpoint_path):
         self.starting_epoch = int(os.path.basename(checkpoint_path.split('.')[0]).split('_')[-1])
         checkpoint = torch.load(checkpoint_path)
-        self.generator_s_t = self.generator_s_t.load_state_dict(checkpoint['generator_s_t'])
-        self.generator_t_s = self.generator_t_s.load_state_dict(checkpoint['generator_t_s'])
-        self.discriminator_t = self.discriminator_t.load_state_dict(checkpoint['discriminator_t'])
-        self.discriminator_s = self.discriminator_s.load_state_dict(checkpoint['discriminator_s'])
-        self.optimizer_generator = self.optimizer_generator.load_state_dict(checkpoint['optimizer_generator'])
-        self.optimizer_discriminator = self.optimizer_discriminator.load_state_dict(checkpoint['optimizer_discriminator'])
+        self.generator_s_t.cuda()
+        self.generator_t_s.cuda()
+        self.discriminator_s.cuda()
+        self.discriminator_t.cuda()
+        self.generator_s_t.load_state_dict(checkpoint['generator_s_t'])
+        self.generator_t_s.load_state_dict(checkpoint['generator_t_s'])
+        self.discriminator_t.load_state_dict(checkpoint['discriminator_t'])
+        self.discriminator_s.load_state_dict(checkpoint['discriminator_s'])
+        self.optimizer_generator.load_state_dict(checkpoint['optimizer_generator'])
+        self.optimizer_discriminator.load_state_dict(checkpoint['optimizer_discriminator'])
     
     def save(self):
         torch.save({'generator_s_t': self.generator_s_t.state_dict(),

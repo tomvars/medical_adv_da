@@ -1,12 +1,11 @@
 import multiprocessing
 import sys
-sys.path.append('../')
 import torch.optim as optim
 import numpy as np
 from functools import partial
-from networks import Destilation_student_matchingInstance
-from utils import save_images
-from utils import bland_altman_loss, dice_soft_loss, ss_loss, generate_affine, non_geometric_augmentations, apply_transform, update_ema_variables
+from src.networks import Destilation_student_matchingInstance
+from src.utils import save_images
+from src.utils import bland_altman_loss, dice_soft_loss, ss_loss, generate_affine, non_geometric_augmentations, apply_transform, update_ema_variables
 
 class MeanTeacherModel:
     def __init__(self, cf, writer, results_folder, models_folder, tensorboard_folder,

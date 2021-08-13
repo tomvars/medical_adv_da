@@ -5,8 +5,10 @@ import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import Dataset, DataLoader
-from utils import batch_adaptation, to_var_gpu
+from pathlib import Path
+from src.utils import batch_adaptation, to_var_gpu
 from monai.data.dataset import Dataset as MonaiDataset
+from monai.data.nifti_saver import NiftiSaver
 from monai.transforms import (LoadImaged,
                               Orientationd,
                               ToTensord,
@@ -14,7 +16,8 @@ from monai.transforms import (LoadImaged,
                               AddChanneld,
                               ResizeWithPadOrCropd,
                               ScaleIntensityd,
-                              SpatialCropd
+                              SpatialCropd,
+                              BatchInverseTransform
                              )
 
 
@@ -525,3 +528,35 @@ def get_monai_slice_dataset(data_dir, paddtarget, slice_selection_method, datase
                          ])
     # Should normalise at the volume level
     return MonaiDataset(data=monai_data_list, transform=transforms)
+
+def infer_on_subject(model, output_path, whole_volume_path, files_df, subject_id, batch_size=10):
+    """
+    Inner loop function to run inference on a single subject
+    """
+    subject_files_df = files_df[files_df['subject_id'] == subject_id]
+    subject_files_df = subject_files_df.sort_values(by='slice_index')
+    monai_data_list = [{'inputs': row['flair_path'],
+                    'labels': row['label_path']}
+                    for _, row in subject_files_df.iterrows()]
+    transforms = Compose([LoadImaged(keys=['inputs', 'labels']),
+                      Orientationd(keys=['inputs', 'labels'], axcodes='RAS'),
+                      AddChanneld(keys=['inputs', 'labels']),
+                      ToTensord(keys=['inputs', 'labels']),
+                      ResizeWithPadOrCropd(keys=['inputs', 'labels'],
+                                           spatial_size=(256, 256)),
+                      SpatialCropd(keys=['inputs', 'labels'], roi_center=(127, 138), roi_size=(96, 96)),
+                      ScaleIntensityd(keys=['inputs'], minv=0.0, maxv=1.0)
+                     ])
+    individual_subject_dataset = MonaiDataset(data=monai_data_list, transform=transforms)
+    inference_dl = DataLoader(individual_subject_dataset, batch_size=batch_size, shuffle=False)
+    inverse_op = BatchInverseTransform(transform=individual_subject_dataset.transform, loader=inference_dl)
+    final_output = []
+    nifti_saver = NiftiSaver(resample=False)
+    img = nib.load(whole_volume_path)
+    for idx, batch in enumerate(inference_dl):
+        # Need to run inference here
+        final_output.append(np.stack([f['inputs'] for f in inverse_op(batch)]))
+        print(final_output[0].shape)
+    volume = np.einsum('ijkl->jkli', np.concatenate(final_output))[:, ::-1, ::-1, ...]
+    nifti_saver = NiftiSaver(output_dir = Path(output_path).parent)
+    nifti_saver.save(volume, meta_data={'affine': img.affine, 'filename_or_obj': output_path})

@@ -24,6 +24,14 @@ results_paths = {'dgx1': '/raid/mauro/DART2019/results',
                  'bd0795ec38f7': '/data2/tom/DomainAdaptationJournal/results'
                  }
 
+inference_paths = {'dgx1': '/raid/mauro/DART2019/inference',
+                 'tom-MS-7B09': '/data/tom/MICCAI2020/inference',
+                 'dgx2-a.ai4vbh.local': '/raid/tomvars/inference/',
+                 'dgx1-1': '/raid/tomvars/inference',
+                 'pretzel': '/raid/tom/inference',
+                 'bd0795ec38f7': '/data2/tom/DomainAdaptationJournal/inference'
+                 }
+
 tensorboard_paths = {'dgx1': '/raid/mauro/DART2019/tensorboard',
                  'tom-MS-7B09': '/data/tom/MICCAI2020/tensorboard',
                  'dgx2-a.ai4vbh.local': '/raid/tomvars/tensorboard/',
@@ -93,6 +101,10 @@ ms_path = {'dgx1':
                 'isbi_whole': '/raid/tom/ISBI2015/training/whole',
                 'isbi_test': '/raid/tom/ISBI2015/testing/slices',
                 'isbi_test_whole': '/raid/tom/ISBI2015/testing/whole',
+               'crossmoda_source': '/data2/tom/crossmoda/source_training/slices',
+                'crossmoda_source_whole': '/data2/tom/crossmoda/source_training/whole',
+                'crossmoda_target': '/data2/tom/crossmoda/target_training/slices',
+                'crossmoda_target_whole': '/data2/tom/crossmoda/target_training/whole',
                 },
            'bd0795ec38f7': {
                 'brats': '/data2/tom/BRATS/slices',

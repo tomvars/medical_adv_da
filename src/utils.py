@@ -119,7 +119,6 @@ def get_center_of_mass_slice(label):
 
 def dice_soft_loss(output, target):
     s = (10e-20)
-    print(output.shape, target.shape)
     intersect = torch.sum(output * target)
     dice = (2 * intersect) / (torch.sum(output) + torch.sum(target) + s)
 

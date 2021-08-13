@@ -5,45 +5,49 @@ import os
 import json
 import pandas as pd
 import argparse
-import torch.optim as optim
 import time
+from pathlib import Path
 import sys
 import nibabel as nib
 from tqdm import tqdm
 from collections import defaultdict
 import itertools
-
-from utils import to_var_gpu
-from utils import apply_transform
-from utils import dice_soft_loss
-from utils import generate_affine
-from utils import loop_iterable
-from utils import ss_loss
-from utils import non_geometric_augmentations
-from utils import load_default_config
-from utils import update_ema_variables
-from utils import bland_altman_loss
-from utils import save_images
-
-from networks import Destilation_student_matchingInstance, SplitHeadModel, GeneratorUnet, get_fpn
 from functools import partial
 import multiprocessing
-
-
-from dataset import SliceDataset, WholeVolumeDataset, SliceDatasetTumour,\
-WholeVolumeDatasetTumour, get_monai_slice_dataset
 import torchvision
 from torch.utils.tensorboard import SummaryWriter
-from paths import results_paths, ms_path, model_saving_paths, tensorboard_paths
-from inference import inference_ms, inference_tumour, inference_crossmoda
-from networks import DiscriminatorDomain, DiscriminatorCycleGAN, DiscriminatorCycleGANSimple
 import torch.nn.functional as F
+import torch.optim as optim
+
 from monai.losses.dice import DiceLoss
-from models.cyclegan import CycleganModel
-from models.mean_teacher import MeanTeacherModel
-from models.supervised_joint import SupervisedJointModel
-from models.supervised import SupervisedModel
-from models.ada import ADAModel
+from monai.data.nifti_saver import NiftiSaver
+
+from inference import inference_ms, inference_tumour, inference_crossmoda
+from src.utils import to_var_gpu
+from src.utils import apply_transform
+from src.utils import dice_soft_loss
+from src.utils import generate_affine
+from src.utils import loop_iterable
+from src.utils import ss_loss
+from src.utils import non_geometric_augmentations
+from src.utils import load_default_config
+from src.utils import update_ema_variables
+from src.utils import bland_altman_loss
+from src.utils import save_images
+from src.networks import Destilation_student_matchingInstance, SplitHeadModel, GeneratorUnet, get_fpn
+from src.networks import DiscriminatorDomain, DiscriminatorCycleGAN, DiscriminatorCycleGANSimple
+from src.dataset import SliceDataset, WholeVolumeDataset, SliceDatasetTumour,\
+WholeVolumeDatasetTumour, get_monai_slice_dataset, infer_on_subject
+from src.paths import results_paths, ms_path, model_saving_paths, tensorboard_paths, inference_paths
+from src.cyclegan import CycleganModel
+from src.mean_teacher import MeanTeacherModel
+from src.supervised_joint import SupervisedJointModel
+from src.supervised import SupervisedModel
+from src.ada import ADAModel
+from src.icmsc import ICMSCModel
+from src.cycada import CycadaModel
+
+
 
 def train(args, model, 
           source_train_slice_dataset, source_val_dataset, source_test_dataset,
@@ -114,7 +118,32 @@ def train(args, model,
         model.save()
     model.writer.close()
 
+def infer(args, model, inference_dir):
+    dataset_split_df = pd.read_csv(args.inference_split, names=['subject_id', 'split'])
+    data_dir = ms_path[os.uname().nodename][args.target] # Target data
+    flair_filenames = os.listdir(os.path.join(data_dir, 'flair'))
+    subject_ids = [x.split('_slice')[0] for x in flair_filenames]
+    slice_idx_arr = [int(x.split('_')[3].replace('.nii.gz', '')) for x in flair_filenames]
+    label_paths = [os.path.join(data_dir, 'labels', x.replace('FLAIR', 'wmh')) for x in flair_filenames]
+    flair_paths = [os.path.join(data_dir, 'flair', x) for x in flair_filenames]
+    files_df = pd.DataFrame(
+        data=[(subj, slice_idx, fp, lp) for subj, slice_idx, fp, lp in zip(subject_ids, slice_idx_arr,
+                                                                           label_paths, flair_paths)],
+        columns=['subject_id', 'slice_index', 'label_path', 'flair_path']
+    )
+    print(files_df)
+    # Need to loop over subject ids
+    subject_ids = files_df.subject_id.unique()
+    with tqdm(total=len(subject_ids), file=sys.stdout) as pbar:
+        for subject_id in subject_ids:
+            output_path = str(Path(inference_dir) / subject_id)
+            print(output_path)
+            whole_volume_path = str(Path(ms_path[os.uname().nodename][args.target]).parent / 'whole' / 'flair' / (subject_id + '.nii.gz'))
+            print(whole_volume_path)
+            infer_on_subject(model, output_path, whole_volume_path, files_df, subject_id, batch_size=10)
+            pbar.update(1)
 
+    
 def main(args):
     
     band = 'refactor_{}_{}_{}'.format(args.method, args.source, args.target)
@@ -123,9 +152,11 @@ def main(args):
     models_folder = model_saving_paths[os.uname().nodename]
     results_folder = results_paths[os.uname().nodename]
     tensorboard_folder = tensorboard_paths[os.uname().nodename]
+    inference_folder = inference_paths[os.uname().nodename]
     run_name='{}_{}'.format(band, args.tag)
     model_factory = {'cyclegan': CycleganModel, 'ada': ADAModel, 'mean_teacher': MeanTeacherModel,
-                     'supervised_joint': SupervisedJointModel, 'supervised': SupervisedModel}
+                     'supervised_joint': SupervisedJointModel, 'supervised': SupervisedModel,
+                     'icmsc': ICMSCModel, 'cycada': CycadaModel}
     slice_dataset = {'ms': SliceDataset, 'crossmoda': get_monai_slice_dataset, 'tumour': SliceDatasetTumour}[args.task]
     whole_volume_dataset = {'ms': WholeVolumeDataset, 'crossmoda': WholeVolumeDataset, 'tumour': WholeVolumeDatasetTumour}[args.task]
     source_train_slice_dataset = slice_dataset(ms_path[os.uname().nodename][args.source],
@@ -164,13 +195,7 @@ def main(args):
         print(args.checkpoint)
         model.load(args.checkpoint)
     if args.infer:
-        p = multiprocessing.Pool(4)
-        target_test_dataset = whole_volume_dataset(ms_path[os.uname().nodename][args.target + '_whole'], split='test',
-                                                   tumour_only=bool(args.tumour_only), paddtarget=args.paddtarget,
-                                                   dataset_split_csv=args.target_split)
-        performance_target_train_s, performance_target_train, _, _ = \
-            inference_func(args, p, seg_model, target_test_dataset, prefix=os.path.join(results_folder, 'target_test'),
-                           epoch=starting_epoch)  # hack
+        infer(args=args, model=model, inference_dir=os.path.join(inference_folder, run_name))
     else:
         train(args=args, model=model, source_val_slice_dataset=source_val_slice_dataset, target_val_slice_dataset=target_val_slice_dataset,
               source_train_slice_dataset=source_train_slice_dataset,
@@ -208,6 +233,7 @@ if __name__ == '__main__':
     parser.add_argument('--task', type=str, metavar='INPUT', help='wmh or tumour')
     parser.add_argument('--source_split', type=str, help='path to dataset_split.csv for source')
     parser.add_argument('--target_split', type=str, help='path to dataset_split.csv for target')
+    parser.add_argument('--inference_split', type=str, help='path to dataset_split.csv for inference (split column is ignored)')
     parser.add_argument('--save_every_n', type=int)
     parser.add_argument('--tensorboard_every_n', type=int)
     parser.add_argument('--use_fixmatch', type=int)

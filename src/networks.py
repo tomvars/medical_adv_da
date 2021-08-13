@@ -3,9 +3,8 @@ from torch.autograd import Variable
 import torch.nn as nn
 import torch.nn.functional as F
 import sys
-sys.path.append('medicaldetectiontoolkit')
-from fpn import FPN
-from model_utils import NDConvGenerator
+from src.medicaldetectiontoolkit.fpn import FPN
+from src.medicaldetectiontoolkit.model_utils import NDConvGenerator
 from dataclasses import dataclass
 
 def initialize_weights(*models):
