@@ -1,4 +1,4 @@
-FROM nvcr.io/nvidia/pytorch:20.10-py3
+FROM nndetection:0.1
 WORKDIR /workspace
 COPY * /workspace/
 RUN pip install -r requirements.txt

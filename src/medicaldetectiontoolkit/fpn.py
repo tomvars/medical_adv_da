@@ -47,8 +47,6 @@ class FPN(nn.Module):
         self.operate_stride1 = operate_stride1
         self.sixth_pooling = cf.sixth_pooling
         self.dim = conv.dim
-        self.final_conv1 = conv(cf.end_filts, 2, ks=1, pad=0, norm=None, relu=None)
-        self.final_conv2 = conv(cf.end_filts, 2, ks=1, pad=0, norm=None, relu=None)
 
         if operate_stride1:
             self.C0 = nn.Sequential(conv(cf.n_channels, start_filts, ks=3, pad=1, norm=cf.norm, relu=cf.relu),
@@ -148,7 +146,6 @@ class FPN(nn.Module):
             p6_pre_out = self.P6_conv1(c6_out)
             p5_pre_out = self.P5_conv1(c5_out) + F.interpolate(p6_pre_out, scale_factor=2)
         else:
-            print(c5_out.shape)
             p5_pre_out = self.P5_conv1(c5_out)
 
         p4_pre_out = self.P4_conv1(c4_out) + F.interpolate(p5_pre_out, scale_factor=2)
@@ -156,17 +153,18 @@ class FPN(nn.Module):
         p2_pre_out = self.P2_conv1(c2_out) + F.interpolate(p3_pre_out, scale_factor=2)
 
         # plot feature map shapes for debugging.
-        # for ii in [c0_out, c1_out, c2_out, c3_out, c4_out, c5_out, c6_out]:
-        #     print ("encoder shapes:", ii.shape)
-        #
-        # for ii in [p6_out, p5_out, p4_out, p3_out, p2_out, p1_out]:
-        #     print("decoder shapes:", ii.shape)
+#         for ii in [c0_out, c1_out, c2_out, c3_out, c4_out, c5_out]:
+#             print ("encoder shapes:", ii.shape)
+        
 
         p2_out = self.P2_conv2(p2_pre_out)
         p3_out = self.P3_conv2(p3_pre_out)
         p4_out = self.P4_conv2(p4_pre_out)
         p5_out = self.P5_conv2(p5_pre_out)
         out_list = [p2_out, p3_out, p4_out, p5_out]
+
+#         for ii in [p5_out, p4_out, p3_out, p2_out]:
+#             print("decoder shapes:", ii.shape)
 
         if self.sixth_pooling:
             p6_out = self.P6_conv2(p6_pre_out)
@@ -179,7 +177,7 @@ class FPN(nn.Module):
             p0_out = self.P0_conv2(p0_pre_out)
             out_list = [p0_out] + out_list
 
-        return self.final_conv1(out_list[0]), self.final_conv2(out_list[0]), out_list, None,None,None,None,None,None,None,None
+        return out_list
 
 
 

@@ -1,6 +1,7 @@
 jupyter
 jupyterlab==3.0.4
-monai==0.5
+monai==0.6.0
 tqdm
 nibabel
 ortools
+antspyx

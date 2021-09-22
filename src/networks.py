@@ -3,9 +3,13 @@ from torch.autograd import Variable
 import torch.nn as nn
 import torch.nn.functional as F
 import sys
+import logging
 from src.medicaldetectiontoolkit.fpn import FPN
 from src.medicaldetectiontoolkit.model_utils import NDConvGenerator
-from dataclasses import dataclass
+from src.medicaldetectiontoolkit.retina_unet import net as retina_unet
+from dataclasses import dataclass, field
+import numpy as np
+logging.basicConfig(level = logging.INFO)
 
 def initialize_weights(*models):
     for model in models:
@@ -296,3 +300,47 @@ def get_fpn():
     conv = NDConvGenerator(2)
     model = FPN(cf=cf, conv=conv, operate_stride1=True)
     return model
+
+def get_retina_unet():
+    logger = logging.getLogger()
+    
+    @dataclass
+    class Config:
+        head_classes: int = 2
+        start_filts: int = 48
+        end_filts: int = 48*4  # start_filts * 4
+        res_architecture: str = 'resnet50'
+        sixth_pooling: bool = False
+        n_channels: int = 1
+        n_latent_dims: int = 0
+        num_seg_classes: int = 2
+        norm: str = 'instance_norm'
+        relu: str = 'leaky_relu'
+        n_rpn_features: int = 512 # 128 in 3D
+        n_rpn_ancho_ratios: list = field(default_factory=lambda: [0.5, 1, 2])
+        rpn_train_anchors_per_image: int = 6
+        anchor_matching_iou: float = 0.2
+        n_anchors_per_pos: int = 9 # len(self.rpn_anchor_ratios) * 3
+        rpn_anchor_stride: int = 1
+        pre_nms_limit: int = 3000 #3000 if self.dim == 2 else 6000
+        rpn_bbox_std_dev: np.array = field(default_factory=lambda: np.array([0.1, 0.1, 0.2, 0.2]))
+        dim: int = 2
+        scale: np.array = field(default_factory=lambda: np.array([256, 256, 256, 256]))#np.array([self.patch_size[0], self.patch_size[1], self.patch_size[0], self.patch_size[1]])
+        window: np.array = field(default_factory=lambda: np.array([0, 0, 256, 256]))
+        detection_nms_threshold: float = 1e-5
+        model_max_instances_per_batch_element: int = 10 #10 if self.dim == 2 else 30
+        model_min_confidence: float = 0.1
+        weight_init: str = None
+        patch_size: np.array = field(default_factory=lambda: np.array([256, 256]))
+        backbone_path: str = '/home/tom/DomainAdaptationJournal/src/medicaldetectiontoolkit/fpn.py'
+        operate_stride1: int = True
+        pyramid_levels: list = field(default_factory=lambda: [0, 1, 2, 3])
+        rpn_anchor_scales: dict = field(default_factory=lambda: {'xy': [[8], [16], [32], [64]], 'z': [[2], [4], [8], [16]]})
+        rpn_anchor_ratios: list = field(default_factory=lambda: [0.5, 1, 2])
+        backbone_strides: dict = field(default_factory=lambda: {'xy': [4, 8, 16, 32], 'z': [1, 2, 4, 8]})
+    cf = Config()
+    cf.backbone_shapes = np.array(
+                    [[int(np.ceil(cf.patch_size[0] / stride)),
+                      int(np.ceil(cf.patch_size[1] / stride))]
+                    for stride in cf.backbone_strides['xy']])
+    return retina_unet(cf=cf, logger=logger)

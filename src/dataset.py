@@ -7,6 +7,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from pathlib import Path
 from src.utils import batch_adaptation, to_var_gpu
+from src.custom_monai_transforms import BoundingBoxesd
 from monai.data.dataset import Dataset as MonaiDataset
 from monai.data.nifti_saver import NiftiSaver
 from monai.transforms import (LoadImaged,
@@ -17,7 +18,8 @@ from monai.transforms import (LoadImaged,
                               ResizeWithPadOrCropd,
                               ScaleIntensityd,
                               SpatialCropd,
-                              BatchInverseTransform
+                              BatchInverseTransform,
+                              MapLabelValued
                              )
 import ants
 
@@ -467,7 +469,7 @@ class Subset(WholeVolumeDataset):
 
 
 def get_monai_slice_dataset(data_dir, paddtarget, slice_selection_method, dataset_split_csv, split,
-                 exclude_slices=None, synthesis=True, tumour_only=False):
+                 exclude_slices=None, synthesis=True, tumour_only=False, bounding_boxes=False):
     """
     This function object expects a data_dir which contains the following structure:
     data_dir
@@ -488,10 +490,6 @@ def get_monai_slice_dataset(data_dir, paddtarget, slice_selection_method, datase
     assert 'flair' in os.listdir(data_dir)
     assert 'labels' in os.listdir(data_dir)
     dataset_split_df = pd.read_csv(dataset_split_csv, names=['subject_id', 'split'])
-    split = split
-    paddtarget = paddtarget
-    slice_selection_method = slice_selection_method
-    synthesis = synthesis
     flair_filenames = os.listdir(os.path.join(data_dir, 'flair'))
     subject_ids = [x.split('_slice')[0] for x in flair_filenames]
     slice_idx_arr = [int(x.split('_')[3].replace('.nii.gz', '')) for x in flair_filenames]
@@ -518,15 +516,19 @@ def get_monai_slice_dataset(data_dir, paddtarget, slice_selection_method, datase
     monai_data_list = [{'inputs': row['flair_path'],
                         'labels': row['label_path']}
                         for _, row in files_df.iterrows()]
-    transforms = Compose([LoadImaged(keys=['inputs', 'labels']),
+    transforms_list = [LoadImaged(keys=['inputs', 'labels']),
                           Orientationd(keys=['inputs', 'labels'], axcodes='RAS'),
                           AddChanneld(keys=['inputs', 'labels']),
                           ToTensord(keys=['inputs', 'labels']),
                           ResizeWithPadOrCropd(keys=['inputs', 'labels'],
                                                spatial_size=(256, 256)),
-                          SpatialCropd(keys=['inputs', 'labels'], roi_center=(127, 138), roi_size=(96, 96)),
+                          MapLabelValued(keys=['labels'], orig_labels=[0, 1, 2], target_labels=[0, 0, 1]),
+                          #SpatialCropd(keys=['inputs', 'labels'], roi_center=(127, 138), roi_size=(96, 96)),
                           ScaleIntensityd(keys=['inputs'], minv=0.0, maxv=1.0)
-                         ])
+                         ]
+    if bounding_boxes:
+        transforms_list.append(BoundingBoxesd(keys=['labels']))
+    transforms = Compose(transforms_list)
     # Should normalise at the volume level
     return MonaiDataset(data=monai_data_list, transform=transforms)
 
@@ -578,7 +580,7 @@ def infer_on_subject(model, output_path, whole_volume_path, files_df, subject_id
     seg = ants.image_read(seg_path)
     resampled_img = ants.resample_image_to_target(image=img, target=orig_img, interp_type='linear')
     resampled_seg = ants.resample_image_to_target(image=seg, target=orig_img, interp_type='nearestNeighbor')
-    transforms = ants.registration(fixed=orig_img, moving=resampled_img, type_of_transform='Affine')
+    transforms = ants.registration(fixed=orig_img, moving=resampled_img, type_of_transform='SyN')
     transformed_seg = ants.apply_transforms(fixed=orig_img, moving=resampled_seg,
                                             transformlist=transforms['fwdtransforms'], interpolator='nearestNeighbor')
     transformed_img = ants.apply_transforms(fixed=orig_img, moving=resampled_img,

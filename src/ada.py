@@ -21,8 +21,8 @@ class ADAModel(BaseModel):
         self.seg_model.cuda()
         self.writer = writer
         self.seg_optimizer = optim.Adam(self.seg_model.parameters(), lr=self.cf.lr)
-        step_1 = 20000 if self.cf.task == 'ms' else 5000
-        step_2 = 20000 if self.cf.task == 'ms' else 10000
+        step_1 = 20000 if self.cf.data_task == 'ms' else 5000
+        step_2 = 20000 if self.cf.data_task == 'ms' else 10000
         scheduler_S = optim.lr_scheduler.MultiStepLR(self.seg_optimizer, milestones=[step_1, step_2], gamma=0.1)
         self.criterion = dice_soft_loss if self.cf.loss == 'dice' else bland_altman_loss
         self.criterion2 = ss_loss
@@ -259,7 +259,7 @@ class ADAModel(BaseModel):
                             'outputs': outputs,
                             'outputst': outputst}
     def tensorboard_logging(self, tensorboard_dict, split):
-        if self.cf.task == 'tumour':
+        if self.cf.data_task == 'tumour':
             for idx, modality in enumerate(['flair', 't1c', 't1', 't2']):
                 save_images(writer=self.writer, images=tensorboard_dict['source_inputs'][:, (idx,), :, :],
                             normalize=True, sigmoid=False,
@@ -270,7 +270,7 @@ class ADAModel(BaseModel):
                 save_images(writer=self.writer, images=tensorboard_dict['inputstaug'][:, (idx,), :, :],
                             normalize=True, sigmoid=False,
                             iteration=self.iterations, name='{}_aug/{}'.format(modality, split))
-        elif self.cf.task == 'ms':
+        elif self.cf.data_task == 'ms':
             save_images(writer=self.writer, images=tensorboard_dict['source_labels'], normalize=True, sigmoid=False,
                         iteration=self.iterations, name='source_labels/{}'.format(split), png=True)
             save_images(writer=self.writer, images=tensorboard_dict['target_labels'], normalize=True, sigmoid=False,

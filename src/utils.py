@@ -7,6 +7,9 @@ from rand_bias_field import RandomBiasFieldLayer
 from rand_kspace import RandomKSpaceLayer
 from rand_hist_norm import RandomHistNormLayer
 import torchvision
+import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
+import matplotlib.gridspec as gridspec
 
 def save_images(writer, images, iteration, name, normalize=True, sigmoid=False, k=3,
                     tensorboard=True, png=False):
@@ -191,3 +194,47 @@ def load_default_config(task):
         crossmoda=json.load(open('config/default_crossmoda_config.json', 'r'))
     )
     return config_dict[task]
+
+def save_bboxes_for_plotting(writer, img, results_dict, name, iteration):
+    """
+    Plot bboxes over first image in batch
+    'boxes': list over batch elements. each batch element is a list of boxes. each box is a dictionary:
+                      [[{box_0}, ... {box_n}], [{box_0}, ... {box_n}], ...]
+                      {'box_coords': boxes[ix2],
+                                                     'box_score': score,
+                                                     'box_type': 'det',
+                                                     'box_pred_class_id': class_ids[ix2]}
+    """
+    boxes = results_dict['boxes']
+    box_results_list = results_dict['box_results_list']
+    fig, axes = plt.subplots(4, 5, gridspec_kw = {'wspace':0, 'hspace':0})
+    for image_idx, ax in enumerate(fig.axes):
+        ax.imshow(img.cpu().numpy()[image_idx, 0, ...], cmap='Greys_r', origin='lower')
+        for box_idx, box in enumerate(boxes[image_idx]):
+            coords = box['box_coords']
+            box_score = box.get('box_score', np.nan)
+            box_type = box.get('box_type', np.nan)
+            box_pred_class_id = box.get('box_pred_class_id', np.nan)
+            # Given coords draw a square
+            rect = Rectangle((coords[0], coords[1]),
+                             coords[2]-coords[0],
+                             coords[3]-coords[1],
+                             linewidth=1,
+                             edgecolor='r', facecolor='none')
+            ax.add_patch(rect)
+        for gt_box_idx, box in enumerate(box_results_list[image_idx]):
+            if box.get('box_type', False) == 'gt':
+                # Add the patch to the Axes
+                gt_coords = box['box_coords']
+                # Given coords draw a square
+                rect = Rectangle((gt_coords[0], gt_coords[1]),
+                                 gt_coords[2]-gt_coords[0],
+                                 gt_coords[3]-gt_coords[1],
+                                 linewidth=1,
+                                 edgecolor='g', facecolor='none')
+                # Add the patch to the Axes
+                ax.add_patch(rect)
+        ax.axis('off')
+    writer.add_figure(tag=name, figure=fig, global_step=iteration)
+    return fig
+    

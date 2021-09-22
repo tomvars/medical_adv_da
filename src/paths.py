@@ -5,7 +5,8 @@ data_paths = {'dgx1': '/raid/tom/Training_ipmi_coronal',
               'dgx2-a.ai4vbh.local': '/raid/tomvars/Training_ipmi_coronal',
               'dgx1-1': '/raid/tomvars/Training_ipmi_coronal',
               'pretzel': '/raid/tom/Training_ipmi_coronal',
-              'bd0795ec38f7': '/data2/tom/Training_ipmi_coronal'
+              'bd0795ec38f7': '/data2/tom/Training_ipmi_coronal',
+              '99bf8a1a46ff': '/data2/tom/Training_ipmi_coronal'
               }
 
 model_saving_paths = {'dgx1': '/raid/mauro/DART2019/',
@@ -13,7 +14,8 @@ model_saving_paths = {'dgx1': '/raid/mauro/DART2019/',
                       'dgx2-a.ai4vbh.local': '/raid/tomvars/models/',
                       'dgx1-1': '/raid/tomvars/models',
                       'pretzel': '/raid/tom/Training_ipmi_coronal',
-                      'bd0795ec38f7': '/data2/tom/DomainAdaptationJournal/models'
+                      'bd0795ec38f7': '/data2/tom/DomainAdaptationJournal/models',
+                      '99bf8a1a46ff': '/data2/tom/DomainAdaptationJournal/models'
                       }
 
 results_paths = {'dgx1': '/raid/mauro/DART2019/results',
@@ -21,7 +23,8 @@ results_paths = {'dgx1': '/raid/mauro/DART2019/results',
                  'dgx2-a.ai4vbh.local': '/raid/tomvars/results/',
                  'dgx1-1': '/raid/tomvars/results',
                  'pretzel': '/raid/tom/results',
-                 'bd0795ec38f7': '/data2/tom/DomainAdaptationJournal/results'
+                 'bd0795ec38f7': '/data2/tom/DomainAdaptationJournal/results',
+                 '99bf8a1a46ff': '/data2/tom/DomainAdaptationJournal/results'
                  }
 
 inference_paths = {'dgx1': '/raid/mauro/DART2019/inference',
@@ -29,7 +32,8 @@ inference_paths = {'dgx1': '/raid/mauro/DART2019/inference',
                  'dgx2-a.ai4vbh.local': '/raid/tomvars/inference/',
                  'dgx1-1': '/raid/tomvars/inference',
                  'pretzel': '/raid/tom/inference',
-                 'bd0795ec38f7': '/data2/tom/DomainAdaptationJournal/inference'
+                 'bd0795ec38f7': '/data2/tom/DomainAdaptationJournal/inference',
+                 '99bf8a1a46ff': '/data2/tom/DomainAdaptationJournal/inference'
                  }
 
 tensorboard_paths = {'dgx1': '/raid/mauro/DART2019/tensorboard',
@@ -37,7 +41,8 @@ tensorboard_paths = {'dgx1': '/raid/mauro/DART2019/tensorboard',
                  'dgx2-a.ai4vbh.local': '/raid/tomvars/tensorboard/',
                  'dgx1-1': '/raid/tomvars/tensorboard',
                  'pretzel': '/raid/tom/tensorboard',
-                 'bd0795ec38f7': '/data2/tom/DomainAdaptationJournal/tensorboard'
+                 'bd0795ec38f7': '/data2/tom/DomainAdaptationJournal/tensorboard/object_detection',
+                 '99bf8a1a46ff': '/data2/tom/DomainAdaptationJournal/tensorboard/object_detection'
                  }
 
 ms_path = {'dgx1':
@@ -107,6 +112,22 @@ ms_path = {'dgx1':
                 'crossmoda_target_whole': '/data2/tom/crossmoda/target_training/whole',
                 },
            'bd0795ec38f7': {
+                'brats': '/data2/tom/BRATS/slices',
+                'brats_whole': '/data2/tom/BRATS/whole_volume',
+                'sheffield_skullstr': '/data2/tom/Sheffield/skullstr/slices',
+                'sheffield_skullstr_whole': '/data2/tom/Sheffield/skullstr/whole',
+                'ms_combined': '/data2/tom/MS_combined/slices',
+                'ms_combined_whole': '/data2/tom/MS_combined/whole',
+                'isbi': '/data2/tom/ISBI2015/training/slices',
+                'isbi_whole': '/data2/tom/ISBI2015/training/whole',
+                'isbi_test': '/data2/tom/ISBI2015/testing/slices',
+                'isbi_test_whole': '/data2/tom/ISBI2015/testing/whole',
+                'crossmoda_source': '/data2/tom/crossmoda/source_training/slices',
+                'crossmoda_source_whole': '/data2/tom/crossmoda/source_training/whole',
+                'crossmoda_target': '/data2/tom/crossmoda/target_training/slices',
+                'crossmoda_target_whole': '/data2/tom/crossmoda/target_training/whole',
+                },
+           '99bf8a1a46ff': {
                 'brats': '/data2/tom/BRATS/slices',
                 'brats_whole': '/data2/tom/BRATS/whole_volume',
                 'sheffield_skullstr': '/data2/tom/Sheffield/skullstr/slices',
