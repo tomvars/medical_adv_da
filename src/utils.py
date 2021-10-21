@@ -1,6 +1,9 @@
 import json
 import numpy as np
 import torch
+import os
+import monai
+import torch
 from torch.autograd import Variable
 import torch.nn.functional as F
 from rand_bias_field import RandomBiasFieldLayer
@@ -13,6 +16,7 @@ import matplotlib.gridspec as gridspec
 
 def save_images(writer, images, iteration, name, normalize=True, sigmoid=False, k=3,
                     tensorboard=True, png=False):
+    if len(images.shape) == 4:
         if normalize:
             images = (images - images.min()) / (images.max() - images.min())
         if sigmoid:
@@ -26,6 +30,50 @@ def save_images(writer, images, iteration, name, normalize=True, sigmoid=False, 
                                          fp=os.path.join(writer.log_dir, f"{name}_{iteration}.png"),
                                          format='png'
                                         )
+    elif len(images.shape) == 5:
+        if normalize:
+            images = (images - images.min()) / (images.max() - images.min())
+        if sigmoid:
+            images = torch.sigmoid(images)
+        monai.visualize.img2tensorboard.add_animated_gif(writer, name, images[0, ...].cpu().detach().numpy(),
+                                                         max_out=images.shape[-1], scale_factor=255,
+                                                         global_step=iteration)
+        
+def create_overlap_image(writer, images, preds, labels, iteration, name, normalize=True, sigmoid=False, k=3,
+                    tensorboard=True, png=False):
+    print('got here at the start')
+    if len(images.shape) == 5:
+        images = (images - images.min()) / (images.max() - images.min())
+        preds = (torch.sigmoid(preds) > 0.5).to(torch.LongTensor()).to('cuda:0')
+        true_positives = preds * labels
+        # R G B
+        true_positives = torch.hstack([torch.zeros_like(true_positives),
+                                       true_positives,
+                                       torch.zeros_like(true_positives)])
+#         true_negatives = (torch.where(preds == 0, 1, 0) *
+#                          torch.where(labels == 0, 1, 0))
+#         true_negatives = torch.hstack([torch.zeros_like(true_negatives),
+#                                        torch.zeros_like(true_negatives),
+#                                        true_negatives])
+        false_positives = (torch.where(preds == 1, 1, 0) *
+                           torch.where(labels == 0, 1, 0))
+        false_positives = torch.hstack([
+            false_positives,
+            torch.zeros_like(false_positives),
+            torch.zeros_like(false_positives)])
+        false_negatives = (torch.where(preds == 0, 1, 0) *
+                           torch.where(labels == 1, 1, 0))
+        false_negatives = torch.hstack([
+            torch.zeros_like(false_negatives),
+            torch.zeros_like(false_negatives),
+            false_negatives])
+        vid_tensor = images.repeat(1, 3, 1, 1, 1)
+        vid_tensor.masked_fill_(true_positives.to(torch.bool), 1)
+        vid_tensor.masked_fill_(false_positives.to(torch.bool), 1)
+        vid_tensor.masked_fill_(false_negatives.to(torch.bool), 1)
+        vid_tensor = vid_tensor.permute(0, 4, 1, 2, 3)
+        writer.add_video(name, vid_tensor, global_step=iteration, fps=6)
+
 
 def soft_dice(seg, target, n_labels):
     ov_dice = np.zeros(n_labels)
@@ -187,11 +235,15 @@ def non_geometric_augmentations(inputs, method='kspace', **kwargs):
     return layer.layer_op(inputs, None)
 
 def load_default_config(task):
-    assert task in ['ms', 'tumour', 'crossmoda']
+    assert task in ['ms', 'ms_3d', 'tumour', 'crossmoda', 'crossmoda_3d', 'microbleed', 'microbleed_3d']
     config_dict = dict(
         ms=json.load(open('config/default_ms_config.json', 'r')),
+        ms_3d=json.load(open('config/default_ms_3d_config.json', 'r')),
         tumour=json.load(open('config/default_tumour_config.json', 'r')),
-        crossmoda=json.load(open('config/default_crossmoda_config.json', 'r'))
+        crossmoda=json.load(open('config/default_crossmoda_config.json', 'r')),
+        crossmoda_3d=json.load(open('config/default_crossmoda_3d_config.json', 'r')),
+        microbleed=json.load(open('config/default_microbleed_config.json', 'r')),
+        microbleed_3d=json.load(open('config/default_microbleed_3d_config.json', 'r')),
     )
     return config_dict[task]
 
@@ -207,14 +259,19 @@ def save_bboxes_for_plotting(writer, img, results_dict, name, iteration):
     """
     boxes = results_dict['boxes']
     box_results_list = results_dict['box_results_list']
-    fig, axes = plt.subplots(4, 5, gridspec_kw = {'wspace':0, 'hspace':0})
+    axis_shape = int(np.ceil(img.shape[0]**0.5))
+    
+    fig, axes = plt.subplots(axis_shape, axis_shape, gridspec_kw = {'wspace':0, 'hspace':0})
     for image_idx, ax in enumerate(fig.axes):
-        ax.imshow(img.cpu().numpy()[image_idx, 0, ...], cmap='Greys_r', origin='lower')
+        if image_idx >= img.shape[0]:
+            break
+        ax.imshow(img.cpu().numpy()[image_idx, 0, ...], cmap='Greys_r', origin='lower', aspect='auto')
         for box_idx, box in enumerate(boxes[image_idx]):
             coords = box['box_coords']
             box_score = box.get('box_score', np.nan)
             box_type = box.get('box_type', np.nan)
             box_pred_class_id = box.get('box_pred_class_id', np.nan)
+            #print(coords, box_score, box_type, box_pred_class_id)
             # Given coords draw a square
             rect = Rectangle((coords[0], coords[1]),
                              coords[2]-coords[0],
@@ -237,4 +294,31 @@ def save_bboxes_for_plotting(writer, img, results_dict, name, iteration):
         ax.axis('off')
     writer.add_figure(tag=name, figure=fig, global_step=iteration)
     return fig
+
+def apply_affine_to_coords(coords, affine):
+    """
+    This function expects the coords to be in medicaldetectiontoolkit format, i.e
+    (y1, x1, y2, x2, z1, z2)
+
+    expects affine to be a numpy array
+    """
+    # convert from medicaldetectiontoolkit to a 2d array of x, y, (z) coords
+    if coords.size == 4: # 2D case
+        standard_coords = coords[np.array([1, 0, 3, 2])].reshape(2, 2).copy()
+        # need to add a column of 1s to make it a 3-vector of coordinates
+        standard_coords = np.hstack([standard_coords, np.ones((2, 1))])
+        new_coords = np.matmul(affine, standard_coords.T)
+        # convert back to medicaldetectiontoolkit format
+        new_coords = new_coords[:2].ravel()[np.array([2, 0, 3, 1])]
+
+    elif coords.size == 6: # 3D case
+        standard_coords = coords[np.array([1, 0, 4, 3, 2, 5])].reshape(2, 3).copy()
+        # need to add a column of 1s to make it a 4-vector of coordinates
+        standard_coords = np.hstack([standard_coords, np.ones((2, 1))])
+        new_coords = np.matmul(affine, standard_coords.T)
+        new_coords = new_coords[:3].ravel()[np.array([2, 0, 3, 1, 4, 5])]
+    else:
+        raise Exception('Incorrect bbox format, must be of size 4 or 6, size found: {}'.format(coords.size))
+
+    return new_coords.astype(int)
     

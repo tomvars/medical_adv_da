@@ -7,6 +7,7 @@ from monai.transforms.utils import generate_spatial_bounding_box
 from monai.transforms.utils import is_positive, optional_import, min_version
 from monai.config import KeysCollection, IndexSelection
 from scipy.ndimage.measurements import label as lb
+import cc3d
 
 ## This would live in monai/transforms/utils.py
 
@@ -26,7 +27,7 @@ def convert_bbox_coordinate_format(original_bbox):
         return original_bbox
     return new_bbox
 
-def get_full_connected_component_mask(img: np.array, connectivity: Optional[int] = None) -> np.array:
+def get_cc_mask(img: np.array, connectivity: Optional[int] = None) -> np.array:
     """
     Gets the largest connected component mask of an image.
 
@@ -37,6 +38,18 @@ def get_full_connected_component_mask(img: np.array, connectivity: Optional[int]
             connectivity of ``input.ndim`` is used.
     """
     return measure.label(img, connectivity=connectivity)
+
+def get_cc_mask_3d(img: np.array, connectivity: Optional[int] = None) -> np.array:
+    """
+    Gets the largest connected component mask of an image.
+
+    Args:
+        img: Image to get largest connected component from. Shape is (spatial_dim1 [, spatial_dim2, ...])
+        connectivity: Maximum number of orthogonal hops to consider a pixel/voxel as a neighbor.
+            Accepted values are ranging from  1 to input.ndim. If ``None``, a full
+            connectivity of ``input.ndim`` is used.
+    """
+    return cc3d.connected_components(img[0, ...].astype(int))
 
 def convert_seg_to_bounding_box_coordinates(
     img: np.array,
@@ -49,14 +62,15 @@ def convert_seg_to_bounding_box_coordinates(
         returns:
         List of tuples of lists of coordinates
     """
+    connected_component_func = get_cc_mask_3d if len(img.shape) == 4 else get_cc_mask
     if foreground_classes is None:
-        cc_mask = get_full_connected_component_mask(img)
+        cc_mask = connected_component_func(img)
         bboxes = [list(generate_spatial_bounding_box(cc_mask, select_fn=lambda x: x==c)) for c in range(1, cc_mask.max()+1)]
         return convert_bbox_coordinate_format(np.array(bboxes)), [1] * len(bboxes)
     else:
         target_output, bboxes = [], []
         for class_idx in foreground_classes:
-            cc_mask = get_full_connected_component_mask((img==class_idx).astype(np.int32))
+            cc_mask = connected_component_func((img==class_idx).astype(np.int32))
             class_specific_bboxes = [list(generate_spatial_bounding_box(cc_mask,
                                                                    select_fn=lambda x: x==c))
                                      for c in range(1, cc_mask.max()+1)]

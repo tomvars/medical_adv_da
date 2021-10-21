@@ -38,16 +38,18 @@ from src.utils import save_images
 from src.networks import Destilation_student_matchingInstance, SplitHeadModel, GeneratorUnet, get_fpn
 from src.networks import DiscriminatorDomain, DiscriminatorCycleGAN, DiscriminatorCycleGANSimple
 from src.dataset import SliceDataset, WholeVolumeDataset, SliceDatasetTumour,\
-WholeVolumeDatasetTumour, get_monai_slice_dataset, infer_on_subject
-from src.paths import results_paths, ms_path, model_saving_paths, tensorboard_paths, inference_paths
+WholeVolumeDatasetTumour, get_monai_slice_dataset, infer_on_subject, get_monai_patch_dataset
+from src.paths import results_paths, data_paths, model_saving_paths, tensorboard_paths, inference_paths
 from src.cyclegan import CycleganModel
 from src.mean_teacher import MeanTeacherModel
 from src.supervised_joint import SupervisedJointModel
 from src.supervised import SupervisedModel
 from src.ada import ADAModel
+from src.ada_3d import ADA3DModel
 from src.icmsc import ICMSCModel
 from src.cycada import CycadaModel
 from src.supervised_retina_unet import SupervisedRetinaUNetModel
+from src.supervised_retina_unet_3d import SupervisedRetinaUNet3DModel
 from src.ada_retina_unet import AdaRetinaUNetModel
 
 
@@ -57,10 +59,14 @@ def train(args, model,
           target_train_slice_dataset,
           source_val_slice_dataset,
           target_val_slice_dataset):
-    source_dl = loop_iterable(DataLoader(source_train_slice_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=lambda x: x))
-    target_dl = loop_iterable(DataLoader(target_train_slice_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=lambda x: x))
-    source_val_slice_dl = loop_iterable(DataLoader(source_val_slice_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=lambda x: x))
-    target_val_slice_dl = loop_iterable(DataLoader(target_val_slice_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=lambda x: x))
+    source_dl = loop_iterable(DataLoader(source_train_slice_dataset, batch_size=args.batch_size,
+                                         shuffle=True, collate_fn=lambda x: x, drop_last=True))
+    target_dl = loop_iterable(DataLoader(target_train_slice_dataset, batch_size=args.batch_size,
+                                         shuffle=True, collate_fn=lambda x: x, drop_last=True))
+    source_val_slice_dl = loop_iterable(DataLoader(source_val_slice_dataset, batch_size=args.batch_size,
+                                                   shuffle=True, collate_fn=lambda x: x, drop_last=True))
+    target_val_slice_dl = loop_iterable(DataLoader(target_val_slice_dataset, batch_size=args.batch_size,
+                                                   shuffle=True, collate_fn=lambda x: x, drop_last=True))
     epoch = -1
     iteration = 0
     is_training = True
@@ -98,7 +104,8 @@ def train(args, model,
             with tqdm(total=len(val_mini_batch_indices), file=sys.stdout) as pbar:
                 for indb, _ in enumerate(val_mini_batch_indices):
                     pbar.update(1)
-                    postfix_dict, tensorboard_dict = model.validation_loop(source_dl, target_dl)
+                    with torch.no_grad():
+                        postfix_dict, tensorboard_dict = model.validation_loop(source_dl, target_dl)
                     if not running_postfix_dict:
                         running_postfix_dict = postfix_dict
                     else:
@@ -119,7 +126,7 @@ def train(args, model,
 
 def infer(args, model, inference_dir):
     dataset_split_df = pd.read_csv(args.inference_split, names=['subject_id', 'split'])
-#     data_dir = ms_path[os.uname().nodename][args.target] # Target data
+#     data_dir = data_paths[os.uname().nodename][args.target] # Target data
     data_dir = '/data2/tom/crossmoda/target_validation/slices'
     flair_filenames = os.listdir(os.path.join(data_dir, 'flair'))
     subject_ids = [x.split('_slice')[0] for x in flair_filenames]
@@ -146,44 +153,73 @@ def infer(args, model, inference_dir):
 def main(args):
     
     band = 'refactor_{}_{}_{}'.format(args.method, args.source, args.target)
-    assert args.data_task in ['ms', 'tumour', 'crossmoda']
+    assert args.data_task in ['ms', 'ms_3d', 'tumour', 'crossmoda', 'crossmoda_3d', 'microbleed', 'microbleed_3d']
     # Directory paths
     models_folder = model_saving_paths[os.uname().nodename]
     results_folder = results_paths[os.uname().nodename]
-    tensorboard_folder = tensorboard_paths[os.uname().nodename]
+    tensorboard_folder = os.path.join(tensorboard_paths[os.uname().nodename], args.task)
     inference_folder = inference_paths[os.uname().nodename]
     run_name='{}_{}'.format(band, args.tag)
-    model_factory = {'cyclegan': CycleganModel, 'ada': ADAModel, 'mean_teacher': MeanTeacherModel,
-                     'supervised_joint': SupervisedJointModel, 'supervised': SupervisedModel,
-                     'icmsc': ICMSCModel, 'cycada': CycadaModel, 'supervised_retina_unet': SupervisedRetinaUNetModel,
-                     'ada_retina_unet': AdaRetinaUNetModel}
-    slice_dataset = {'ms': SliceDataset, 'crossmoda': get_monai_slice_dataset, 'tumour': SliceDatasetTumour}[args.data_task]
-    whole_volume_dataset = {'ms': WholeVolumeDataset, 'crossmoda': WholeVolumeDataset, 'tumour': WholeVolumeDatasetTumour}[args.data_task]
+    model_factory = {'cyclegan': CycleganModel,
+                     'ada': ADAModel,
+                     'ada_3d': ADA3DModel,
+                     'mean_teacher': MeanTeacherModel,
+                     'supervised_joint': SupervisedJointModel,
+                     'supervised': SupervisedModel,
+                     'icmsc': ICMSCModel, 'cycada': CycadaModel,
+                     'supervised_retina_unet': SupervisedRetinaUNetModel,
+                     'supervised_retina_unet_3d': SupervisedRetinaUNet3DModel,
+                     'ada_retina_unet': AdaRetinaUNetModel} # If you want to go 3D implement a new model...
+    dataset_factory = {'ms': get_monai_slice_dataset,
+                       'ms_3d': get_monai_patch_dataset,
+                       'crossmoda': get_monai_slice_dataset,
+                       'crossmoda_3d': get_monai_patch_dataset,
+                       'microbleed': get_monai_slice_dataset,
+                       'microbleed_3d': get_monai_patch_dataset,
+                       'tumour': SliceDatasetTumour}[args.data_task]
+
     # Customise the data input pipeline based on the current task or model used #
+    label_mapping = {'crossmoda': {0: 0, 1: 1, 2: 0},
+                     'crossmoda_3d': {0: 0, 1: 1, 2: 0},
+                     'ms': {0: 0, 1: 1, 2: 1, 3: 1},
+                     'ms_3d': {0: 0, 1: 1, 2: 1, 3: 1},
+                    }.get(args.data_task, None)
     bboxes = True if args.task == 'object_detection' else False
-    return_augmented_inputs = True if args.method in ['ada', 'ada_retina_unet'] else False
+    return_aug = True if args.method in ['ada', 'ada_retina_unet', 'ada_3d'] else False # If True, return augmented inputs
     #############################################################################
-    source_train_slice_dataset = slice_dataset(ms_path[os.uname().nodename][args.source],
-                                               exclude_slices = list(range(70,192)) + list(range(20)),
-                                               paddtarget=args.paddtarget, split='train', tumour_only=bool(args.tumour_only),
+    source_train_slice_dataset = dataset_factory(data_paths[os.uname().nodename][args.source],
+                                                 exclude_slices = [], #list(range(70,192)) + list(range(20)),
+                                                 spatial_size=args.spatial_size,
+                                                 paddtarget=args.paddtarget, split='train', tumour_only=bool(args.tumour_only),
+                                                 slice_selection_method='mask', dataset_split_csv=args.source_split,
+                                                 bounding_boxes=bboxes, return_aug=False, label_mapping=label_mapping)
+    source_val_slice_dataset = dataset_factory(data_paths[os.uname().nodename][args.source],
+                                               spatial_size=args.spatial_size,
+                                               paddtarget=args.paddtarget, split='val', tumour_only=bool(args.tumour_only),
                                                slice_selection_method='mask', dataset_split_csv=args.source_split,
-                                               bounding_boxes=bboxes)
-    source_val_slice_dataset = slice_dataset(ms_path[os.uname().nodename][args.source],
-                                             paddtarget=args.paddtarget, split='val', tumour_only=bool(args.tumour_only),
-                                             slice_selection_method='mask', dataset_split_csv=args.source_split,
-                                             bounding_boxes=bboxes)
-    target_train_slice_dataset = slice_dataset(ms_path[os.uname().nodename][args.target],
-                                               paddtarget=args.paddtarget, split='train',
-                                               exclude_slices = list(range(70,192)) + list(range(20)),
-                                               slice_selection_method='mask', dataset_split_csv=args.target_split, bounding_boxes=bboxes)
-    target_val_slice_dataset = slice_dataset(ms_path[os.uname().nodename][args.target],
-                                             paddtarget=args.paddtarget, split='val',
-                                             slice_selection_method='mask', dataset_split_csv=args.target_split, bounding_boxes=bboxes)
+                                               bounding_boxes=bboxes, return_aug=False, label_mapping=label_mapping)
+    target_train_slice_dataset = dataset_factory(data_paths[os.uname().nodename][args.target],
+                                                 spatial_size=args.spatial_size,
+                                                 paddtarget=args.paddtarget, split='train',
+                                                 exclude_slices = [], # list(range(70,192)) + list(range(20)),
+                                                 slice_selection_method='mask', dataset_split_csv=args.target_split,
+                                                 bounding_boxes=bboxes, return_aug=return_aug, label_mapping=label_mapping)
+    target_val_slice_dataset = dataset_factory(data_paths[os.uname().nodename][args.target],
+                                               spatial_size=args.spatial_size,
+                                               paddtarget=args.paddtarget, split='val',
+                                               slice_selection_method='mask', dataset_split_csv=args.target_split,
+                                               bounding_boxes=bboxes, return_aug=return_aug, label_mapping=label_mapping)
     writer = SummaryWriter(tensorboard_folder+'/{}/{}_{}'.format(args.data_task, band, args.tag))
-    inference_func = {'ms': inference_ms, 'tumour': inference_tumour, 'crossmoda': inference_crossmoda}[args.data_task]
-#     save_images = partial(save_images, k=1 if args.data_task == 'tumour' else 3)
-    model = model_factory[args.method](cf=args, writer=writer, models_folder=models_folder,
-                                       results_folder=results_folder, tensorboard_folder=tensorboard_folder, run_name=run_name)
+#     inference_func = {'ms': inference_ms,
+#                       'tumour': inference_tumour,
+#                       'crossmoda': inference_crossmoda,
+#                       'microbleed': inference_crossmoda,
+#                      }[args.data_task]
+    model = model_factory[args.method](cf=args, writer=writer,
+                                       models_folder=models_folder,
+                                       results_folder=results_folder,
+                                       tensorboard_folder=tensorboard_folder,
+                                       run_name=run_name)
     if args.checkpoint != "null":
         print('Loading model from checkpoint')
         print(args.checkpoint)
@@ -238,6 +274,7 @@ if __name__ == '__main__':
     parser.add_argument('--checkpoint', type=str, help='path to checkpoint')
     parser.add_argument('--infer', type=int, help='0 if training else 1')
     parser.add_argument('--tumour_only', type=int, help='1 if tumour only labels to be used else 0')
+    parser.add_argument('--spatial_size', nargs='+', help='e.g 256 256')
     args = parser.parse_args()
     config = load_default_config(args.data_task) if args.config is None else json.load(open(args.config, 'r'))
     arg_dict = vars(args)

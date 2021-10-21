@@ -11,7 +11,9 @@ from src.custom_monai_transforms import BoundingBoxesd
 from monai.data.dataset import Dataset as MonaiDataset
 from monai.data.nifti_saver import NiftiSaver
 from monai.transforms import (LoadImaged,
+                              Lambdad,
                               Orientationd,
+                              SqueezeDimd,
                               ToTensord,
                               Compose,
                               AddChanneld,
@@ -19,7 +21,11 @@ from monai.transforms import (LoadImaged,
                               ScaleIntensityd,
                               SpatialCropd,
                               BatchInverseTransform,
-                              MapLabelValued
+                              RandWeightedCropd,
+                              MapLabelValued,
+                              CopyItemsd,
+                              RandAffined,
+                              Spacingd
                              )
 import ants
 
@@ -469,22 +475,26 @@ class Subset(WholeVolumeDataset):
 
 
 def get_monai_slice_dataset(data_dir, paddtarget, slice_selection_method, dataset_split_csv, split,
-                 exclude_slices=None, synthesis=True, tumour_only=False, bounding_boxes=False):
+                            spatial_dims=2, spatial_size=[256, 256], exclude_slices=None,
+                            synthesis=True, tumour_only=False, bounding_boxes=False, 
+                            return_aug=False, label_mapping=None):
     """
     This function object expects a data_dir which contains the following structure:
     data_dir
     |
-    ----flair
-          |
-          ----- FLAIR_<subject id as int>_slice_<slice id as int>.nii.gz
-          ----- FLAIR_<subject id as int>_slice_<slice id as int>.nii.gz
-          ----- FLAIR_<subject id as int>_slice_<slice id as int>.nii.gz
-    ----labels
-          |
-          ----- wmh_<subject id as int>_slice_<slice id as int>.nii.gz
-          ----- wmh_<subject id as int>_slice_<slice id as int>.nii.gz
-          ----- wmh_<subject id as int>_slice_<slice id as int>.nii.gz
+    slices
+        ----flair
+              |
+              ----- FLAIR_<subject id as int>_slice_<slice id as int>.nii.gz
+              ----- FLAIR_<subject id as int>_slice_<slice id as int>.nii.gz
+              ----- FLAIR_<subject id as int>_slice_<slice id as int>.nii.gz
+        ----labels
+              |
+              ----- wmh_<subject id as int>_slice_<slice id as int>.nii.gz
+              ----- wmh_<subject id as int>_slice_<slice id as int>.nii.gz
+              ----- wmh_<subject id as int>_slice_<slice id as int>.nii.gz
     """
+    data_dir = os.path.join(data_dir, 'slices')
     assert slice_selection_method in ['mask', 'none']
     assert isinstance(paddtarget, int)
     assert 'flair' in os.listdir(data_dir)
@@ -506,29 +516,119 @@ def get_monai_slice_dataset(data_dir, paddtarget, slice_selection_method, datase
     # Apply split filter to images
     images_to_use = dataset_split_df[dataset_split_df['split'] == split]['subject_id'].values
     files_df = files_df[files_df['subject_id'].isin(images_to_use)]
-    # Need to return a Monai Dataset object
-    # Expects data to be an array of dictionaries e.g
-    # [{                            {                            {
-    #         'img': 'image1.nii.gz',      'img': 'image2.nii.gz',      'img': 'image3.nii.gz',
-    #         'seg': 'label1.nii.gz',      'seg': 'label2.nii.gz',      'seg': 'label3.nii.gz',
-    #         'extra': 123                 'extra': 456                 'extra': 789
-    #     },
     monai_data_list = [{'inputs': row['flair_path'],
                         'labels': row['label_path']}
                         for _, row in files_df.iterrows()]
-    transforms_list = [LoadImaged(keys=['inputs', 'labels']),
-                          Orientationd(keys=['inputs', 'labels'], axcodes='RAS'),
-                          AddChanneld(keys=['inputs', 'labels']),
-                          ToTensord(keys=['inputs', 'labels']),
-                          ResizeWithPadOrCropd(keys=['inputs', 'labels'],
-                                               spatial_size=(256, 256)),
-                          MapLabelValued(keys=['labels'], orig_labels=[0, 1, 2], target_labels=[0, 0, 1]),
-                          #SpatialCropd(keys=['inputs', 'labels'], roi_center=(127, 138), roi_size=(96, 96)),
-                          ScaleIntensityd(keys=['inputs'], minv=0.0, maxv=1.0)
-                         ]
+    transforms_list = [
+        LoadImaged(keys=['inputs', 'labels']),
+        Orientationd(keys=['inputs', 'labels'], axcodes='RAS'),
+        AddChanneld(keys=['inputs', 'labels']),
+        ToTensord(keys=['inputs', 'labels']),
+        ResizeWithPadOrCropd(keys=['inputs', 'labels'], spatial_size=spatial_size),
+        #SpatialCropd(keys=['inputs', 'labels'], roi_center=(127, 138), roi_size=(96, 96)),
+#         ScaleIntensityd(keys=['inputs'], minv=0.0, maxv=1.0)
+    ]
+    if isinstance(label_mapping, dict):
+        transforms_list.append(MapLabelValued(keys=['labels'],
+                                              orig_labels=label_mapping.keys(),
+                                              target_labels=label_mapping.values()))
     if bounding_boxes:
         transforms_list.append(BoundingBoxesd(keys=['labels']))
+    if return_aug:
+        transforms_list.append(CopyItemsd(keys=["inputs"], names=["inputs_aug"], times=1))
+        transforms_list.append(RandAffined(
+            keys=["inputs_aug"],
+            allow_missing_keys=True,
+            spatial_size=spatial_size,
+            prob=1.0,
+            rotate_range=0.1,
+            shear_range=0.0,
+            translate_range=(0.1, 0.1, 0.1),
+            scale_range=[-0.1, 0.1],
+        ))
     transforms = Compose(transforms_list)
+    # Should normalise at the volume level
+    return MonaiDataset(data=monai_data_list, transform=transforms)
+
+def get_monai_patch_dataset(data_dir, paddtarget, slice_selection_method, dataset_split_csv, split,
+                            spatial_size=[128, 128, 24], spatial_dims=3, exclude_slices=None,
+                            synthesis=True, tumour_only=False, bounding_boxes=False,
+                            return_aug=False, label_mapping=None):
+    """
+    This function object expects a data_dir which contains the following structure:
+    data_dir
+    |
+    whole/
+        ----flair
+              |
+              ----- FLAIR_<subject id as int>.nii.gz
+              ----- FLAIR_<subject id as int>.nii.gz
+              ----- FLAIR_<subject id as int>.nii.gz
+        ----labels
+              |
+              ----- wmh_<subject id as int>.nii.gz
+              ----- wmh_<subject id as int>.nii.gz
+              ----- wmh_<subject id as int>.nii.gz
+    """
+    data_dir = os.path.join(data_dir, 'whole')
+    assert slice_selection_method in ['mask', 'none']
+    assert isinstance(paddtarget, int)
+    assert 'flair' in os.listdir(data_dir)
+    assert 'labels' in os.listdir(data_dir)
+    dataset_split_df = pd.read_csv(dataset_split_csv, names=['subject_id', 'split'])
+    flair_filenames = os.listdir(os.path.join(data_dir, 'flair'))
+    subject_ids = np.array([x.replace('.nii.gz', '') for x in flair_filenames])
+    flair_paths = [os.path.join(data_dir, 'flair', x) for x in flair_filenames]
+    label_paths = [os.path.join(data_dir, 'labels', x.replace('FLAIR', 'wmh')) for x in flair_filenames]
+    files_df = pd.DataFrame(
+        data=[(subj, fp, lp) for subj, fp, lp in zip(subject_ids, label_paths, flair_paths)],
+        columns=['subject_id', 'label_path', 'flair_path']
+    )
+    # Apply split filter to images
+    images_to_use = dataset_split_df[dataset_split_df['split'] == split]['subject_id'].values
+    files_df = files_df[files_df['subject_id'].isin(images_to_use)]
+    monai_data_list = [{'inputs': row['flair_path'],
+                        'labels': row['label_path']}
+                        for _, row in files_df.iterrows()]
+    def reweight_map(weight_map):
+        weight_map[weight_map == 1] = 0.5
+        weight_map[weight_map == 0] = 0.5/weight_map.size
+        return weight_map
+    transforms_list = [
+        LoadImaged(keys=['inputs', 'labels']),
+        Orientationd(keys=['inputs', 'labels'], axcodes='RAS'),
+        Spacingd(keys=['inputs'], pixdim=[1.0, 1.0, 2.0], mode='bilinear'),
+        Spacingd(keys=['labels'], pixdim=[1.0, 1.0, 2.0], mode='nearest'),
+        CopyItemsd(keys=['labels'], times=1, names=['weight_map']),
+        AddChanneld(keys=['inputs', 'weight_map', 'labels']),
+#         Lambdad(keys='weight_map', func=reweight_map),
+        RandWeightedCropd(keys=['inputs', 'labels'],
+                          w_key='weight_map',
+                          spatial_size=spatial_size, num_samples=2),
+        #SpatialCropd(keys=['inputs', 'labels'], roi_center=(127, 138), roi_size=(96, 96)),
+        ScaleIntensityd(keys=['inputs'], minv=0.0, maxv=1.0),
+#         SqueezeDimd(keys=['inputs', 'labels'], dim=0),
+    ]
+    if isinstance(label_mapping, dict):
+        transforms_list.append(MapLabelValued(keys=['labels'],
+                                              orig_labels=label_mapping.keys(),
+                                              target_labels=label_mapping.values()))
+    if bounding_boxes:
+        transforms_list.append(BoundingBoxesd(keys=['labels']))
+        #transforms_list.append(AddChanneld(keys=['inputs', 'labels']))
+    if return_aug:
+        transforms_list.append(CopyItemsd(keys=["inputs"], names=["inputs_aug"], times=1))
+        transforms_list.append(RandAffined(
+            keys=["inputs_aug"],
+            allow_missing_keys=True,
+            spatial_size=spatial_size,
+            prob=1.0,
+            rotate_range=0.1,
+            shear_range=0.0,
+            translate_range=(0.1, 0.1, 0.1),
+            scale_range=[-0.1, 0.1],
+        ))
+    transforms = Compose(transforms_list + [ToTensord(keys=['inputs', 'labels'])])
     # Should normalise at the volume level
     return MonaiDataset(data=monai_data_list, transform=transforms)
 

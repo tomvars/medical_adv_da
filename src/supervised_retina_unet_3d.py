@@ -8,14 +8,14 @@ import numpy as np
 import itertools
 from functools import partial
 from src.base_model import BaseModel
-from src.networks import get_2d_retina_unet
+from src.networks import get_3d_retina_unet
 from src.utils import save_bboxes_for_plotting
 from src.utils import save_images
 from src.utils import bland_altman_loss, dice_soft_loss, ss_loss, generate_affine, non_geometric_augmentations, apply_transform
 import src.medicaldetectiontoolkit.model_utils as mutils
 from src.medicaldetectiontoolkit.retina_unet import compute_class_loss, compute_bbox_loss, get_results
 
-class SupervisedRetinaUNetModel(BaseModel):
+class SupervisedRetinaUNet3DModel(BaseModel):
     def __init__(self, cf, writer, results_folder, models_folder, tensorboard_folder,
                  run_name, starting_epoch=0):
         super().__init__()
@@ -25,7 +25,7 @@ class SupervisedRetinaUNetModel(BaseModel):
         self.tensorboard_folder = tensorboard_folder
         self.run_name = run_name
         self.starting_epoch = starting_epoch
-        self.retina_unet = get_2d_retina_unet()
+        self.retina_unet = get_3d_retina_unet()
         self.writer = writer
         self.seg_optimizer = optim.SGD(self.retina_unet.parameters(), lr=self.cf.lr, weight_decay=0.01, nesterov=True, momentum=0.9)
         self.scheduler = optim.lr_scheduler.MultiStepLR(self.seg_optimizer, milestones=[20000, 20000], gamma=0.1)
@@ -43,17 +43,22 @@ class SupervisedRetinaUNetModel(BaseModel):
         postfix_dict, tensorboard_dict = {}, {}
         # Data is coming in in un-collated batches, need to collate them here 
         source_batch = next(source_dl)
-        source_inputs, source_labels = (np.stack([f['inputs'] for f in source_batch]),
-                                        np.stack([f['labels'] for f in source_batch]))
+        source_inputs, source_labels = (np.stack([f[0]['inputs'] for f in source_batch]),
+                                        np.stack([f[0]['labels'] for f in source_batch]))
 
         target_batch = next(target_dl)
-        target_inputs, target_labels = (torch.tensor(np.stack([f['inputs'] for f in target_batch])).to(self.device),
-                                        torch.tensor(np.stack([f['labels'] for f in target_batch])).to(self.device))
+        target_inputs, target_labels = (torch.tensor(np.stack([f[0]['inputs'] for f in target_batch])).to(self.device),
+                                        torch.tensor(np.stack([f[0]['labels'] for f in target_batch])).to(self.device))
         
         # Training segmentation model from Generated T2s
         img = source_inputs
-        gt_class_ids = [f['labels_class_target'] for f in source_batch]
-        gt_boxes = [f['labels_bbox'] for f in source_batch]
+        gt_class_ids = [f[0]['labels_class_target'] for f in source_batch]
+        gt_boxes = [f[0]['labels_bbox'] for f in source_batch]
+        print(source_labels.shape)
+        print(source_inputs.shape)
+        print(target_inputs.shape)
+        print(target_labels.shape)
+        print(np.array(gt_boxes).shape)
         var_seg_ohe = torch.FloatTensor(mutils.get_one_hot_encoding(source_labels, self.cf.labels)).cuda()
         var_seg = torch.LongTensor(source_labels).cuda()
 

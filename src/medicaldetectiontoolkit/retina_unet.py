@@ -154,7 +154,6 @@ def compute_class_loss(anchor_matches, class_pred_logits, shem_poolsize=20):
     else:
         neg_loss = torch.FloatTensor([0]).cuda()
         np_neg_ix = np.array([]).astype('int32')
-
     loss = (pos_loss + neg_loss) / 2 # + number of positive matches
     return loss, np_neg_ix
 
@@ -197,8 +196,13 @@ def refine_detections(anchors, probs, deltas, batch_ixs, cf):
     :param batch_ixs: (n_proposals) batch element assignemnt info for re-allocation.
     :return: result: (n_final_detections, (y1, x1, y2, x2, (z1), (z2), batch_ix, pred_class_id, pred_score))
     """
-    anchors = anchors.repeat(batch_ixs.unique().shape[0] * 3, 1) # This * 3 is a hack, need to find out why
-
+    anchors = anchors.repeat(batch_ixs.unique().shape[0], 1) # This * 3 is a hack, need to find out why
+    print(anchors.shape)
+    print(batch_ixs.unique().shape[0])
+    print(probs.shape)
+    print(deltas.shape)
+#     exit()
+#     exit()
     # flatten foreground probabilities, sort and trim down to highest confidences by pre_nms limit.
     fg_probs = probs[:, 1:].contiguous()
     flat_probs, flat_probs_order = fg_probs.view(-1).sort(descending=True)
@@ -206,7 +210,11 @@ def refine_detections(anchors, probs, deltas, batch_ixs, cf):
     # reshape indices to 2D index array with shape like fg_probs.
     keep_arr = torch.cat(((keep_ix / fg_probs.shape[1]).unsqueeze(1),
                           (keep_ix % fg_probs.shape[1]).unsqueeze(1)), 1).long()
-    
+    print(flat_probs.shape)
+    print(cf.pre_nms_limit)
+    print(keep_arr.shape)
+    print(batch_ixs.shape)
+    exit()
     pre_nms_scores = flat_probs[:cf.pre_nms_limit]
     pre_nms_class_ids = keep_arr[:, 1] + 1  # add background again.
     pre_nms_batch_ixs = batch_ixs[keep_arr[:, 0]]
@@ -490,9 +498,10 @@ class net(nn.Module):
         # Loop through pyramid layers
         class_layer_outputs, bb_reg_layer_outputs = [], []  # list of lists
         for p in selected_fmaps:
-            class_layer_outputs.append(self.Classifier(p))
+            classifier_output = self.Classifier(p)
+            class_layer_outputs.append(classifier_output)
             bb_reg_layer_outputs.append(self.BBRegressor(p))
-
+            
         # Concatenate layer outputs
         # Convert from list of lists of level outputs to list of lists
         # of outputs across levels.

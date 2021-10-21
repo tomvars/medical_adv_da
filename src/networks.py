@@ -4,11 +4,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 import sys
 import logging
+from monai.networks.nets import BasicUNet
 from src.medicaldetectiontoolkit.fpn import FPN
 from src.medicaldetectiontoolkit.model_utils import NDConvGenerator
 from src.medicaldetectiontoolkit.retina_unet import net as retina_unet
 from dataclasses import dataclass, field
 import numpy as np
+
 logging.basicConfig(level = logging.INFO)
 
 def initialize_weights(*models):
@@ -301,7 +303,7 @@ def get_fpn():
     model = FPN(cf=cf, conv=conv, operate_stride1=True)
     return model
 
-def get_retina_unet():
+def get_2d_retina_unet():
     logger = logging.getLogger()
     
     @dataclass
@@ -320,7 +322,7 @@ def get_retina_unet():
         n_rpn_ancho_ratios: list = field(default_factory=lambda: [0.5, 1, 2])
         rpn_train_anchors_per_image: int = 6
         anchor_matching_iou: float = 0.2
-        n_anchors_per_pos: int = 9 # len(self.rpn_anchor_ratios) * 3
+        n_anchors_per_pos: int = 3 # len(self.rpn_anchor_ratios) * 3
         rpn_anchor_stride: int = 1
         pre_nms_limit: int = 3000 #3000 if self.dim == 2 else 6000
         rpn_bbox_std_dev: np.array = field(default_factory=lambda: np.array([0.1, 0.1, 0.2, 0.2]))
@@ -344,3 +346,110 @@ def get_retina_unet():
                       int(np.ceil(cf.patch_size[1] / stride))]
                     for stride in cf.backbone_strides['xy']])
     return retina_unet(cf=cf, logger=logger)
+
+def get_3d_retina_unet():
+    logger = logging.getLogger()
+    
+    @dataclass
+    class Config:
+        head_classes: int = 2
+        start_filts: int = 18
+        end_filts: int = 18*2  # start_filts * 4
+        res_architecture: str = 'resnet50'
+        sixth_pooling: bool = False
+        n_channels: int = 1
+        n_latent_dims: int = 0
+        num_seg_classes: int = 2
+        norm: str = 'instance_norm'
+        relu: str = 'leaky_relu'
+        n_rpn_features: int = 64 # 128 in 3D
+        rpn_anchor_ratios: list = field(default_factory=lambda: [0.5, 1, 2])
+        rpn_train_anchors_per_image: int = 6
+        anchor_matching_iou: float = 0.2
+        roi_chunk_size: int = 600
+        n_anchors_per_pos: int = 3 # len(self.rpn_anchor_ratios) * 3
+        rpn_anchor_stride: int = 1
+        pre_nms_limit: int = 50000 #3000 if self.dim == 2 else 6000
+        rpn_bbox_std_dev: np.array = field(default_factory=lambda: np.array([0.1, 0.1, 0.1, 0.2, 0.2, 0.2]))
+        bbox_std_dev: np.array = field(default_factory=lambda: np.array([0.1, 0.1, 0.1, 0.2, 0.2, 0.2]))
+        dim: int = 3
+        scale: np.array = field(default_factory=lambda: np.array([128, 128, 128, 128, 24, 24]))#np.array([self.patch_size[0], self.patch_size[1], self.patch_size[0], self.patch_size[1]])
+        window: np.array = field(default_factory=lambda: np.array([0, 0, 128, 128, 0, 24]))
+        detection_nms_threshold: float = 1e-5
+        model_max_instances_per_batch_element: int = 30 #10 if self.dim == 2 else 30
+        model_min_confidence: float = 0.1
+        weight_init: str = None
+        patch_size: np.array = field(default_factory=lambda: np.array([128, 128, 24]))
+        backbone_path: str = '/home/tom/DomainAdaptationJournal/src/medicaldetectiontoolkit/fpn.py'
+        operate_stride1: int = True
+        pyramid_levels: list = field(default_factory=lambda: [0, 1, 2, 3])
+        rpn_anchor_scales: dict = field(default_factory=lambda: {'xy': [[16], [32], [64], [128]], 'z': [[2], [4], [8], [16]]})
+        rpn_anchor_ratios: list = field(default_factory=lambda: [0.5, 1, 2])
+        backbone_strides: dict = field(default_factory=lambda: {'xy': [1, 2, 4, 8], 'z': [1, 2, 4, 8]})
+    cf = Config()
+    cf.backbone_shapes = np.array(
+                    [[int(np.ceil(cf.patch_size[0] / stride)),
+                      int(np.ceil(cf.patch_size[1] / stride))]
+                    for stride in cf.backbone_strides['xy']])
+    cf.rpn_anchor_scales['xy'] = [[ii[0], ii[0] * (2 ** (1 / 3)), ii[0] * (2 ** (2 / 3))] for ii in
+                                            cf.rpn_anchor_scales['xy']]
+    cf.rpn_anchor_scales['z'] = [[ii[0], ii[0] * (2 ** (1 / 3)), ii[0] * (2 ** (2 / 3))] for ii in
+                                   cf.rpn_anchor_scales['z']]
+    cf.operate_stride1 = True
+    return retina_unet(cf=cf, logger=logger)
+
+class BasicUNetFeatures(BasicUNet):
+        
+    def forward(self, x: torch.Tensor):
+        """
+        Args:
+            x: input should have spatially N dimensions
+                ``(Batch, in_channels, dim_0[, dim_1, ..., dim_N])``, N is defined by `dimensions`.
+                It is recommended to have ``dim_n % 16 == 0`` to ensure all maxpooling inputs have
+                even edge lengths.
+
+        Returns:
+            A torch Tensor of "raw" predictions in shape
+            ``(Batch, out_channels, dim_0[, dim_1, ..., dim_N])``.
+        """
+        x0 = self.conv_0(x)
+
+        x1 = self.down_1(x0)
+        x2 = self.down_2(x1)
+        x3 = self.down_3(x2)
+        x4 = self.down_4(x3)
+
+        u4 = self.upcat_4(x4, x3)
+        u3 = self.upcat_3(u4, x2)
+        u2 = self.upcat_2(u3, x1)
+        u1 = self.upcat_1(u2, x0)
+
+        logits = self.final_conv(u1)
+        return (logits, x1, x2, x3, x4, u4, u3, u2, u1)
+    
+class Discriminator3D(nn.Module):
+    def __init__(self, num_channels, num_classes, complexity):
+        super(Discriminator3D, self).__init__()
+        self.conv1 = nn.Conv3d(num_channels, int(8 * complexity), kernel_size=3, stride=2)
+        self.BN1 = nn.InstanceNorm3d(int(8 * complexity))
+        self.conv2 = nn.Conv3d(int(8 * complexity), int(16 * complexity), kernel_size=3, stride=2)
+        self.BN2 = nn.InstanceNorm3d(int(16 * complexity))
+        self.conv3 = nn.Conv3d(int(16 * complexity), int(32 * complexity), kernel_size=3, stride=2)
+        self.BN3 = nn.InstanceNorm3d(int(32 * complexity))
+        self.conv4 = nn.Conv3d(int(32 * complexity), int(64 * complexity), kernel_size=(3, 3, 1), stride=2)
+        self.BN4 = nn.InstanceNorm3d(int(64 * complexity))
+        self.conv5 = nn.Conv3d(int(64 * complexity), 1, kernel_size=(3, 3, 1), stride=2)
+        self.fc1 = nn.Linear(9, num_classes)
+
+    def forward(self, x):
+        x = F.leaky_relu(self.BN1(self.conv1(x)), 0.2)
+        x = F.leaky_relu(self.BN2(self.conv2(x)), 0.2)
+        x = F.leaky_relu(self.BN3(self.conv3(x)), 0.2)
+        x = F.leaky_relu(self.BN4(self.conv4(x)), 0.2)
+        x = F.leaky_relu(self.conv5(x), 0.2)
+        complexity = x.size(1)
+        x = x.view(-1, int(x.size(2) * x.size(3) * complexity))
+        x = self.fc1(x)
+
+        return x
+     
