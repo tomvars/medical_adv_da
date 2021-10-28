@@ -558,12 +558,14 @@ def gt_anchor_matching(cf, anchors, gt_boxes, gt_class_ids=None):
     gt_iou_argmax = np.argmax(overlaps, axis=0)
     for ix, ii in enumerate(gt_iou_argmax):
         anchor_class_matches[ii] = gt_class_ids[ix]
-
+    # Tom: We want to include the idea of 'low_quality_matches' here
     # 3. Set anchors with high overlap as positive.
     above_trhesh_ixs = np.argwhere(anchor_iou_max >= anchor_matching_iou)
     if above_trhesh_ixs.size == 0:
+        print(f'No matches above {anchor_matching_iou}! Closest is {anchor_iou_max.max()}')
         anchor_class_matches = np.full(anchor_class_matches.shape, fill_value=-1)
         return anchor_class_matches, anchor_delta_targets
+    
     # anchor_class_matches is of size anchors, but gt_class_ids is not...
     anchor_class_matches[above_trhesh_ixs] = np.array(gt_class_ids)[anchor_iou_argmax[above_trhesh_ixs]]
     # Subsample to balance positive anchors.

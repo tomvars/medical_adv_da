@@ -10,7 +10,7 @@
   "affine_rot_degree": 5,
   "affine_scale": [0.9, 1.2],
   "affine_shearing": [0.01, 0.01],
-  "spatial_size": [128, 128, 24],
+  "spatial_size": [128, 128, 64],
   "loss": "dice",
   "iterations_adapt": 1000,
   "thssaving": 0.2,

@@ -597,8 +597,8 @@ def get_monai_patch_dataset(data_dir, paddtarget, slice_selection_method, datase
     transforms_list = [
         LoadImaged(keys=['inputs', 'labels']),
         Orientationd(keys=['inputs', 'labels'], axcodes='RAS'),
-        Spacingd(keys=['inputs'], pixdim=[1.0, 1.0, 2.0], mode='bilinear'),
-        Spacingd(keys=['labels'], pixdim=[1.0, 1.0, 2.0], mode='nearest'),
+        Spacingd(keys=['inputs'], pixdim=[1.0, 1.0, 1.0], mode='bilinear'),
+        Spacingd(keys=['labels'], pixdim=[1.0, 1.0, 1.0], mode='nearest'),
         CopyItemsd(keys=['labels'], times=1, names=['weight_map']),
         AddChanneld(keys=['inputs', 'weight_map', 'labels']),
 #         Lambdad(keys='weight_map', func=reweight_map),

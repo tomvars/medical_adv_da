@@ -1,6 +1,7 @@
 import json
 import numpy as np
 import torch
+import io
 import os
 import monai
 import torch
@@ -13,6 +14,7 @@ import torchvision
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 import matplotlib.gridspec as gridspec
+import src.medicaldetectiontoolkit.model_utils as mutils
 
 def save_images(writer, images, iteration, name, normalize=True, sigmoid=False, k=3,
                     tensorboard=True, png=False):
@@ -41,10 +43,12 @@ def save_images(writer, images, iteration, name, normalize=True, sigmoid=False, 
         
 def create_overlap_image(writer, images, preds, labels, iteration, name, normalize=True, sigmoid=False, k=3,
                     tensorboard=True, png=False):
-    print('got here at the start')
     if len(images.shape) == 5:
         images = (images - images.min()) / (images.max() - images.min())
-        preds = (torch.sigmoid(preds) > 0.5).to(torch.LongTensor()).to('cuda:0')
+        if sigmoid:
+            preds = (torch.sigmoid(preds) > 0.5).to(torch.LongTensor()).to('cuda:0')
+        else:
+            preds = (preds > 0.5).to(torch.LongTensor()).to('cuda:0')
         true_positives = preds * labels
         # R G B
         true_positives = torch.hstack([torch.zeros_like(true_positives),
@@ -294,6 +298,82 @@ def save_bboxes_for_plotting(writer, img, results_dict, name, iteration):
         ax.axis('off')
     writer.add_figure(tag=name, figure=fig, global_step=iteration)
     return fig
+
+def create_bbox_overlap_volume(writer,
+                               images, results_dict,
+                               iteration, name, normalize=True, sigmoid=False, k=3,
+                               tensorboard=True, png=False):
+    # images.shape B, C, H, W, D
+    boxes = results_dict['boxes']
+    box_results_list = results_dict['box_results_list']
+    bboxes_data = []
+    images = (images - images.min()) / (images.max() - images.min())
+    gt_outlines, gt_mask_outlines = [], []
+    pred_outlines, pred_mask_outlines = [], []
+    for batch_ix in range(images.shape[0]):
+        main_pred_mask_outline = np.zeros_like(images[0].cpu().numpy()[0])
+        gt_outline = torch.tensor(main_pred_mask_outline).repeat(3, 1, 1, 1)
+        gt_mask_outline = torch.tensor(main_pred_mask_outline).repeat(3, 1, 1, 1)
+        gt_bboxes = [box['box_coords'] for box in box_results_list[batch_ix] if box.get('box_type', False) == 'gt']
+        pred_bboxes = [(box['box_coords']) for box in boxes[batch_ix] if box.get('box_type', False) != 'gt']
+        if gt_bboxes:
+            ious, _ = mutils.bbox_overlaps_3D(torch.tensor(gt_bboxes),
+                                              torch.tensor(pred_bboxes)).max(dim=0)
+            # y1, x1, y2, x2, z1, z2
+            def plot_bbox(bbox, initial_mask=None, iou=1, cmap='RdYlGn', return_pytorch_mask=True):
+                # Cube is composed of a series of lines...
+                # Outline should be difference between 2 cubes, with 1 voxel difference
+                # Fill in outer cube, subtract inner cube
+                if initial_mask == None:
+                    mask = np.zeros_like(images[batch_ix].cpu().numpy()[0])
+                else:
+                    mask = initial_mask.copy()
+                y1, x1, y2, x2, z1, z2 = bbox
+                x1, y1, x2, y2, z1, z2 = int(x1), int(y1), int(x2), int(y2), int(z1), int(z2)
+                mask[x1:x2, y1:y2, z1:z2] = iou
+                mask[x1+1:x2-1, y1+1:y2-1, z1:z2] = 0
+
+                output_array = plt.get_cmap(cmap)(mask)[..., :3]
+                output_array = np.transpose(output_array, axes=(3, 0, 1, 2))
+                if return_pytorch_mask:
+                    return torch.tensor(output_array), torch.tensor(mask).repeat(3, 1, 1, 1)
+                else:
+                    return torch.tensor(output_array), mask
+
+            gt_outline, gt_mask_outline = plot_bbox(gt_bboxes[0])
+            # Need to output a combined mask and a combined coloured mask
+            for pred_bbox, iou in zip(pred_bboxes, ious):
+                _, pred_mask_outline = plot_bbox(pred_bbox, cmap='bwr', return_pytorch_mask=False, iou=float(iou))
+                main_pred_mask_outline = np.logical_or(main_pred_mask_outline, pred_mask_outline)
+        main_pred_outline = plt.get_cmap('bwr')(main_pred_mask_outline.astype(float))[..., :3]
+        main_pred_outline = torch.tensor(np.transpose(main_pred_outline, axes=(3, 0, 1, 2)))
+        gt_outlines.append(gt_outline)
+        gt_mask_outlines.append(gt_mask_outline)
+        pred_outlines.append(main_pred_outline)
+        pred_mask_outlines.append(torch.tensor(main_pred_mask_outline).repeat(3, 1, 1, 1))
+        
+    gt_outlines = torch.stack(gt_outlines)
+    gt_mask_outlines = torch.stack(gt_mask_outlines)
+    pred_outlines = torch.stack(pred_outlines)
+    pred_mask_outlines = torch.stack(pred_mask_outlines)
+    
+    
+    vid_tensor = images.repeat(1, 3, 1, 1, 1).detach().cpu()
+    
+    # Adding the pred
+    vid_tensor.masked_fill_(pred_mask_outlines.to(torch.bool), 0)
+    pred_outlines.masked_fill_(~pred_mask_outlines.to(torch.bool), 0)
+    vid_tensor = vid_tensor + pred_outlines
+    
+    # Adding the gt
+    vid_tensor.masked_fill_(gt_mask_outlines.to(torch.bool), 0)
+    gt_outlines.masked_fill_(~gt_mask_outlines.to(torch.bool), 0)
+    vid_tensor = vid_tensor + gt_outlines
+    
+    
+    vid_tensor = vid_tensor.permute(0, 4, 1, 2, 3)
+    writer.add_video(name, vid_tensor, global_step=iteration, fps=6)
+
 
 def apply_affine_to_coords(coords, affine):
     """

@@ -237,6 +237,7 @@ class ADA3DModel(BaseModel):
                                  images=tensorboard_dict['source_inputs'],
                                  preds=tensorboard_dict['source_outputs'],
                                  labels=tensorboard_dict['source_labels'],
+                                 sigmoid=True,
                                  iteration=self.iterations, name='source_confusion_plot/{}'.format(split))
             
         for key, value in postfix_dict.items():

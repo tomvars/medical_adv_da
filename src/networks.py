@@ -321,7 +321,7 @@ def get_2d_retina_unet():
         n_rpn_features: int = 512 # 128 in 3D
         n_rpn_ancho_ratios: list = field(default_factory=lambda: [0.5, 1, 2])
         rpn_train_anchors_per_image: int = 6
-        anchor_matching_iou: float = 0.2
+        anchor_matching_iou: float = 0.5
         n_anchors_per_pos: int = 3 # len(self.rpn_anchor_ratios) * 3
         rpn_anchor_stride: int = 1
         pre_nms_limit: int = 3000 #3000 if self.dim == 2 else 6000
@@ -347,15 +347,19 @@ def get_2d_retina_unet():
                     for stride in cf.backbone_strides['xy']])
     return retina_unet(cf=cf, logger=logger)
 
-def get_3d_retina_unet():
+def get_3d_retina_unet(spatial_size,
+                       base_rpn_anchor_scale_xy=2,
+                       base_rpn_anchor_scale_z=2,
+                       base_backbone_strides_xy=4,
+                       base_backbone_strides_z=1):
     logger = logging.getLogger()
     
     @dataclass
     class Config:
         head_classes: int = 2
-        start_filts: int = 18
-        end_filts: int = 18*2  # start_filts * 4
-        res_architecture: str = 'resnet50'
+        start_filts: int = 48
+        end_filts: int = 48*2  # start_filts * 4
+        res_architecture: str = 'resnet101'
         sixth_pooling: bool = False
         n_channels: int = 1
         n_latent_dims: int = 0
@@ -367,30 +371,50 @@ def get_3d_retina_unet():
         rpn_train_anchors_per_image: int = 6
         anchor_matching_iou: float = 0.2
         roi_chunk_size: int = 600
-        n_anchors_per_pos: int = 3 # len(self.rpn_anchor_ratios) * 3
+        n_anchors_per_pos: int = 9 #len(cf.rpn_anchor_ratios) * 3
         rpn_anchor_stride: int = 1
         pre_nms_limit: int = 50000 #3000 if self.dim == 2 else 6000
         rpn_bbox_std_dev: np.array = field(default_factory=lambda: np.array([0.1, 0.1, 0.1, 0.2, 0.2, 0.2]))
         bbox_std_dev: np.array = field(default_factory=lambda: np.array([0.1, 0.1, 0.1, 0.2, 0.2, 0.2]))
         dim: int = 3
-        scale: np.array = field(default_factory=lambda: np.array([128, 128, 128, 128, 24, 24]))#np.array([self.patch_size[0], self.patch_size[1], self.patch_size[0], self.patch_size[1]])
-        window: np.array = field(default_factory=lambda: np.array([0, 0, 128, 128, 0, 24]))
+        scale: np.array = field(default_factory=lambda: np.array([spatial_size[0], spatial_size[1],
+                                                                  spatial_size[0], spatial_size[1],
+                                                                  spatial_size[2], spatial_size[2]]))
+        window: np.array = field(default_factory=lambda: np.array([0, 0, spatial_size[0],
+                                                                   spatial_size[0], 0,
+                                                                   spatial_size[2]]))
         detection_nms_threshold: float = 1e-5
         model_max_instances_per_batch_element: int = 30 #10 if self.dim == 2 else 30
         model_min_confidence: float = 0.1
         weight_init: str = None
-        patch_size: np.array = field(default_factory=lambda: np.array([128, 128, 24]))
+        patch_size: np.array = field(default_factory=lambda: np.array(spatial_size))
         backbone_path: str = '/home/tom/DomainAdaptationJournal/src/medicaldetectiontoolkit/fpn.py'
         operate_stride1: int = True
         pyramid_levels: list = field(default_factory=lambda: [0, 1, 2, 3])
-        rpn_anchor_scales: dict = field(default_factory=lambda: {'xy': [[16], [32], [64], [128]], 'z': [[2], [4], [8], [16]]})
+        rpn_anchor_scales: dict = field(default_factory=lambda: {'xy': [[base_rpn_anchor_scale_xy],
+                                                                        [base_rpn_anchor_scale_xy*2],
+                                                                        [base_rpn_anchor_scale_xy*4],
+                                                                        [base_rpn_anchor_scale_xy*8]],
+                                                                 'z': [[base_rpn_anchor_scale_z],
+                                                                       [base_rpn_anchor_scale_z*2],
+                                                                       [base_rpn_anchor_scale_z*4],
+                                                                       [base_rpn_anchor_scale_z*8]]})
+        backbone_strides: dict = field(default_factory=lambda:  {'xy': [base_backbone_strides_xy,
+                                                                        base_backbone_strides_xy*2,
+                                                                        base_backbone_strides_xy*4,
+                                                                        base_backbone_strides_xy*8],
+                                                                 'z': [base_backbone_strides_z,
+                                                                       base_backbone_strides_z*2,
+                                                                       base_backbone_strides_z*4,
+                                                                       base_backbone_strides_z*8]})
         rpn_anchor_ratios: list = field(default_factory=lambda: [0.5, 1, 2])
-        backbone_strides: dict = field(default_factory=lambda: {'xy': [1, 2, 4, 8], 'z': [1, 2, 4, 8]})
     cf = Config()
     cf.backbone_shapes = np.array(
-                    [[int(np.ceil(cf.patch_size[0] / stride)),
-                      int(np.ceil(cf.patch_size[1] / stride))]
-                    for stride in cf.backbone_strides['xy']])
+                [[int(np.ceil(cf.patch_size[0] / stride)),
+                  int(np.ceil(cf.patch_size[1] / stride)),
+                  int(np.ceil(cf.patch_size[2] / stride_z))]
+                 for stride, stride_z in zip(cf.backbone_strides['xy'], cf.backbone_strides['z']
+                                             )])
     cf.rpn_anchor_scales['xy'] = [[ii[0], ii[0] * (2 ** (1 / 3)), ii[0] * (2 ** (2 / 3))] for ii in
                                             cf.rpn_anchor_scales['xy']]
     cf.rpn_anchor_scales['z'] = [[ii[0], ii[0] * (2 ** (1 / 3)), ii[0] * (2 ** (2 / 3))] for ii in

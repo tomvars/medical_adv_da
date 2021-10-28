@@ -49,7 +49,7 @@ def get_cc_mask_3d(img: np.array, connectivity: Optional[int] = None) -> np.arra
             Accepted values are ranging from  1 to input.ndim. If ``None``, a full
             connectivity of ``input.ndim`` is used.
     """
-    return cc3d.connected_components(img[0, ...].astype(int))
+    return np.expand_dims(cc3d.connected_components(img[0, ...].astype(int)), axis=0)
 
 def convert_seg_to_bounding_box_coordinates(
     img: np.array,

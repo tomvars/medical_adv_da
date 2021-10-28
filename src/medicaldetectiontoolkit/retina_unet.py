@@ -196,13 +196,10 @@ def refine_detections(anchors, probs, deltas, batch_ixs, cf):
     :param batch_ixs: (n_proposals) batch element assignemnt info for re-allocation.
     :return: result: (n_final_detections, (y1, x1, y2, x2, (z1), (z2), batch_ix, pred_class_id, pred_score))
     """
-    anchors = anchors.repeat(batch_ixs.unique().shape[0], 1) # This * 3 is a hack, need to find out why
-    print(anchors.shape)
-    print(batch_ixs.unique().shape[0])
-    print(probs.shape)
-    print(deltas.shape)
-#     exit()
-#     exit()
+    anchors = anchors.repeat(batch_ixs.unique().shape[0], 1)
+    if anchors.shape[0] != deltas.shape[0]:
+        raise Exception(f'Shapes {anchors.shape[0]} and {deltas.shape[0]} are not compatible')
+
     # flatten foreground probabilities, sort and trim down to highest confidences by pre_nms limit.
     fg_probs = probs[:, 1:].contiguous()
     flat_probs, flat_probs_order = fg_probs.view(-1).sort(descending=True)
@@ -210,11 +207,6 @@ def refine_detections(anchors, probs, deltas, batch_ixs, cf):
     # reshape indices to 2D index array with shape like fg_probs.
     keep_arr = torch.cat(((keep_ix / fg_probs.shape[1]).unsqueeze(1),
                           (keep_ix % fg_probs.shape[1]).unsqueeze(1)), 1).long()
-    print(flat_probs.shape)
-    print(cf.pre_nms_limit)
-    print(keep_arr.shape)
-    print(batch_ixs.shape)
-    exit()
     pre_nms_scores = flat_probs[:cf.pre_nms_limit]
     pre_nms_class_ids = keep_arr[:, 1] + 1  # add background again.
     pre_nms_batch_ixs = batch_ixs[keep_arr[:, 0]]

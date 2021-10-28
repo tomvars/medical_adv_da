@@ -10,6 +10,8 @@ from functools import partial
 from src.base_model import BaseModel
 from src.networks import get_3d_retina_unet
 from src.utils import save_bboxes_for_plotting
+from src.utils import create_overlap_image
+from src.utils import create_bbox_overlap_volume
 from src.utils import save_images
 from src.utils import bland_altman_loss, dice_soft_loss, ss_loss, generate_affine, non_geometric_augmentations, apply_transform
 import src.medicaldetectiontoolkit.model_utils as mutils
@@ -25,7 +27,7 @@ class SupervisedRetinaUNet3DModel(BaseModel):
         self.tensorboard_folder = tensorboard_folder
         self.run_name = run_name
         self.starting_epoch = starting_epoch
-        self.retina_unet = get_3d_retina_unet()
+        self.retina_unet = get_3d_retina_unet(self.cf.spatial_size)
         self.writer = writer
         self.seg_optimizer = optim.SGD(self.retina_unet.parameters(), lr=self.cf.lr, weight_decay=0.01, nesterov=True, momentum=0.9)
         self.scheduler = optim.lr_scheduler.MultiStepLR(self.seg_optimizer, milestones=[20000, 20000], gamma=0.1)
@@ -35,8 +37,6 @@ class SupervisedRetinaUNet3DModel(BaseModel):
     
     def initialise(self):
         self.p = multiprocessing.Pool(10)
-        # Gradient clipping!
-        torch.nn.utils.clip_grad_norm(itertools.chain(self.retina_unet.parameters()), 100.0)
         
     def training_loop(self, source_dl, target_dl):
         self.scheduler.step()
@@ -54,11 +54,6 @@ class SupervisedRetinaUNet3DModel(BaseModel):
         img = source_inputs
         gt_class_ids = [f[0]['labels_class_target'] for f in source_batch]
         gt_boxes = [f[0]['labels_bbox'] for f in source_batch]
-        print(source_labels.shape)
-        print(source_inputs.shape)
-        print(target_inputs.shape)
-        print(target_labels.shape)
-        print(np.array(gt_boxes).shape)
         var_seg_ohe = torch.FloatTensor(mutils.get_one_hot_encoding(source_labels, self.cf.labels)).cuda()
         var_seg = torch.LongTensor(source_labels).cuda()
 
@@ -95,6 +90,7 @@ class SupervisedRetinaUNet3DModel(BaseModel):
             anchor_target_deltas = torch.from_numpy(anchor_target_deltas).float().cuda()
 
             # compute losses.
+            assert anchor_class_match.shape[0] == class_logits[b].shape[0]
             class_loss, neg_anchor_ix = compute_class_loss(anchor_class_match, class_logits[b])
             bbox_loss = compute_bbox_loss(anchor_target_deltas, pred_deltas[b], anchor_class_match)
 
@@ -116,6 +112,9 @@ class SupervisedRetinaUNet3DModel(BaseModel):
         seg_loss_dice = 1 - mutils.batch_dice(F.softmax(seg_logits, dim=1), var_seg_ohe)
         seg_loss_ce = (F.cross_entropy(seg_logits, var_seg[:, 0]))
         loss = batch_class_loss + batch_bbox_loss + (seg_loss_dice + seg_loss_ce) / 2
+        torch.nn.utils.clip_grad_norm(itertools.chain(self.retina_unet.parameters()), 10.0)
+        loss.backward()
+        self.seg_optimizer.step()
         postfix_dict['torch_loss'] = loss.item()
         postfix_dict['class_loss'] = batch_class_loss.item()
         postfix_dict['bbox_loss'] = batch_bbox_loss.item()
@@ -125,12 +124,9 @@ class SupervisedRetinaUNet3DModel(BaseModel):
         tensorboard_dict = {
             'source_inputs': img,
             'source_labels': var_seg,
-            'outputs_source': F.softmax(seg_logits, dim=1),
+            'source_outputs': F.softmax(seg_logits, dim=1)[:, 1:, ...],
             'results_dict': results_dict
         }
-        torch.nn.utils.clip_grad_norm(itertools.chain(self.retina_unet.parameters()), 10.0)
-        loss.backward()
-        self.seg_optimizer.step()
         return postfix_dict, tensorboard_dict
     
     def validation_loop(self, source_dl, target_dl):
@@ -138,16 +134,17 @@ class SupervisedRetinaUNet3DModel(BaseModel):
         with torch.no_grad():
             # Data is coming in in un-collated batches, need to collate them here 
             source_batch = next(source_dl)
-            source_inputs, source_labels = (np.stack([f['inputs'] for f in source_batch]),
-                                            np.stack([f['labels'] for f in source_batch]))
-    #         target_batch = next(target_dl)
-    #         target_inputs, target_labels = (torch.tensor(np.stack([f['inputs'] for f in target_batch])).to(self.device),
-    #                                         torch.tensor(np.stack([f['labels'] for f in target_batch])).to(self.device))
+            source_inputs, source_labels = (np.stack([f[0]['inputs'] for f in source_batch]),
+                                            np.stack([f[0]['labels'] for f in source_batch]))
+
+            target_batch = next(target_dl)
+            target_inputs, target_labels = (torch.tensor(np.stack([f[0]['inputs'] for f in target_batch])).to(self.device),
+                                            torch.tensor(np.stack([f[0]['labels'] for f in target_batch])).to(self.device))
 
             # Training segmentation model from Generated T2s
             img = source_inputs
-            gt_class_ids = [f['labels_class_target'] for f in source_batch]
-            gt_boxes = [f['labels_bbox'] for f in source_batch]
+            gt_class_ids = [f[0]['labels_class_target'] for f in source_batch]
+            gt_boxes = [f[0]['labels_bbox'] for f in source_batch]
             var_seg_ohe = torch.FloatTensor(mutils.get_one_hot_encoding(source_labels, self.cf.labels)).cuda()
             var_seg = torch.LongTensor(source_labels).cuda()
 
@@ -199,8 +196,11 @@ class SupervisedRetinaUNet3DModel(BaseModel):
 
             results_dict = get_results(self.retina_unet.cf, img.shape, detections, seg_logits, box_results_list)
             results_dict['box_results_list'] = box_results_list
+            if torch.isnan(seg_logits).any():
+                #'/data2/tom/microbleeds/VALDO_T2S/slices/flair/FLAIR_sub-227_slice_0047.nii.gz'
+                exit()
             seg_loss_dice = 1 - mutils.batch_dice(F.softmax(seg_logits, dim=1), var_seg_ohe)
-            seg_loss_ce = F.cross_entropy(seg_logits, var_seg[:, 0])
+            seg_loss_ce = (F.cross_entropy(seg_logits, var_seg[:, 0]))
             loss = batch_class_loss + batch_bbox_loss + (seg_loss_dice + seg_loss_ce) / 2
             postfix_dict['torch_loss'] = loss.item()
             postfix_dict['class_loss'] = batch_class_loss.item()
@@ -211,10 +211,10 @@ class SupervisedRetinaUNet3DModel(BaseModel):
             tensorboard_dict = {
                 'source_inputs': img,
                 'source_labels': var_seg,
-                'outputs_source': F.softmax(seg_logits, dim=1),
-                'results_dict': results_dict,
+                'source_outputs': F.softmax(seg_logits, dim=1)[:, 1:, ...],
+                'results_dict': results_dict
             }
-        return postfix_dict, tensorboard_dict
+            return postfix_dict, tensorboard_dict
     
     def tensorboard_logging(self, postfix_dict, tensorboard_dict, split):
         if self.cf.data_task == 'tumour':
@@ -228,41 +228,18 @@ class SupervisedRetinaUNet3DModel(BaseModel):
                 save_images(writer=self.writer, images=tensorboard_dict['inputstaug'][:, (idx,), :, :],
                             normalize=True, sigmoid=False,
                             iteration=self.iterations, name=modality + '_aug')
-        elif self.cf.data_task == 'ms':
-            save_images(writer=self.writer, images=tensorboard_dict['source_labels'], normalize=True, sigmoid=False,
-                        iteration=self.iterations, name='source_labels', png=True)
-            save_images(writer=self.writer, images=tensorboard_dict['target_labels'], normalize=True, sigmoid=False,
-                        iteration=self.iterations, name='target_labels', png=True)
-            save_images(writer=self.writer, images=tensorboard_dict['outputs'], normalize=False, sigmoid=True,
-                        iteration=self.iterations, name='outputs_source', png=True)
-            save_images(writer=self.writer, images=tensorboard_dict['source_inputs'], normalize=True,
-                        sigmoid=False, png=True,
-                        iteration=self.iterations, name='source_inputs')
-            save_images(writer=self.writer, images=tensorboard_dict['target_inputs'], normalize=True,
-                        sigmoid=False, png=True,
-                        iteration=self.iterations, name='targets_inputs')
-        elif self.cf.data_task == 'crossmoda':
-            save_images(writer=self.writer, images=tensorboard_dict['source_inputs'], normalize=True,
-                                   sigmoid=False, png=False,
-                                   iteration=self.iterations, name='source_inputs/{}'.format(split))
-            save_images(writer=self.writer, images=tensorboard_dict['outputs_source'], normalize=False, sigmoid=True,
-                                   iteration=self.iterations, name='outputs_source_cochlea/{}'.format(split), png=False)
-            save_images(writer=self.writer, images=tensorboard_dict['source_labels'], normalize=True, sigmoid=False,
-                                   iteration=self.iterations, name='cochlea_labels/{}'.format(split), png=False)
-            save_bboxes_for_plotting(writer=self.writer, img=tensorboard_dict['source_inputs'], name='bbox_plot/{}'.format(split),
-                                     results_dict=tensorboard_dict['results_dict'], iteration=self.iterations)
-            for key, value in postfix_dict.items():
-                self.writer.add_scalar('{}/{}'.format(key, split), value, self.iterations)
-        elif self.cf.data_task == 'microbleed':
-            save_images(writer=self.writer, images=tensorboard_dict['source_inputs'], normalize=True,
-                                   sigmoid=False, png=False,
-                                   iteration=self.iterations, name='source_inputs/{}'.format(split))
-            save_images(writer=self.writer, images=tensorboard_dict['outputs_source'], normalize=False, sigmoid=True,
-                                   iteration=self.iterations, name='outputs_source_microbleed/{}'.format(split), png=False)
-            save_images(writer=self.writer, images=tensorboard_dict['source_labels'], normalize=True, sigmoid=False,
-                                   iteration=self.iterations, name='microbleed_labels/{}'.format(split), png=False)
-            save_bboxes_for_plotting(writer=self.writer, img=tensorboard_dict['source_inputs'], name='bbox_plot/{}'.format(split),
-                                     results_dict=tensorboard_dict['results_dict'], iteration=self.iterations)
+        elif self.cf.data_task in ['microbleed_3d', 'crossmoda_3d']:
+            create_bbox_overlap_volume(writer=self.writer,
+                                       images=tensorboard_dict['source_inputs'],
+                                       results_dict=tensorboard_dict['results_dict'],
+                                       iteration=self.iterations,
+                                       name='bbox_plot_source/{}'.format(split),
+                                       tensorboard=True, png=False)
+            create_overlap_image(writer=self.writer,
+                                 images=tensorboard_dict['source_inputs'],
+                                 preds=tensorboard_dict['source_outputs'],
+                                 labels=tensorboard_dict['source_labels'],
+                                 iteration=self.iterations, name='source_confusion_plot/{}'.format(split))
             for key, value in postfix_dict.items():
                 self.writer.add_scalar('{}/{}'.format(key, split), value, self.iterations)     
 

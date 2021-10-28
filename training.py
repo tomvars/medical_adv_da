@@ -54,7 +54,7 @@ from src.ada_retina_unet import AdaRetinaUNetModel
 
 
 
-def train(args, model, 
+def train(args, model, starting_iteration,
           source_train_slice_dataset,
           target_train_slice_dataset,
           source_val_slice_dataset,
@@ -68,7 +68,7 @@ def train(args, model,
     target_val_slice_dl = loop_iterable(DataLoader(target_val_slice_dataset, batch_size=args.batch_size,
                                                    shuffle=True, collate_fn=lambda x: x, drop_last=True))
     epoch = -1
-    iteration = 0
+    iteration = starting_iteration
     is_training = True
     model.initialise()
     try:
@@ -210,11 +210,12 @@ def main(args):
                                                slice_selection_method='mask', dataset_split_csv=args.target_split,
                                                bounding_boxes=bboxes, return_aug=return_aug, label_mapping=label_mapping)
     writer = SummaryWriter(tensorboard_folder+'/{}/{}_{}'.format(args.data_task, band, args.tag))
-#     inference_func = {'ms': inference_ms,
-#                       'tumour': inference_tumour,
-#                       'crossmoda': inference_crossmoda,
-#                       'microbleed': inference_crossmoda,
-#                      }[args.data_task]
+    inference_func = {'ms': inference_ms,
+                      'tumour': inference_tumour,
+                      'crossmoda': inference_crossmoda,
+                      'microbleed': inference_crossmoda,
+                      'microbleed_3d': patch_based_inference
+                     }[args.data_task]
     model = model_factory[args.method](cf=args, writer=writer,
                                        models_folder=models_folder,
                                        results_folder=results_folder,
@@ -224,10 +225,13 @@ def main(args):
         print('Loading model from checkpoint')
         print(args.checkpoint)
         model.load(args.checkpoint)
-    if args.infer:
-        infer(args=args, model=model, inference_dir=os.path.join(inference_folder, run_name))
+        starting_iteration = int(args.checkpoint.split('_')[-1].replace('.pt', ''))
     else:
-        train(args=args, model=model,
+        starting_iteration = 0
+    if args.infer:
+        inference_func(args=args, model=model, inference_dir=os.path.join(inference_folder, run_name))
+    else:
+        train(args=args, model=model, starting_iteration=starting_iteration,
               source_val_slice_dataset=source_val_slice_dataset,
               target_val_slice_dataset=target_val_slice_dataset,
               source_train_slice_dataset=source_train_slice_dataset,
@@ -280,6 +284,7 @@ if __name__ == '__main__':
     arg_dict = vars(args)
     for key, value in arg_dict.items():
         arg_dict[key] = config[key] if value is None else value
+    arg_dict['spatial_size'] = [int(f) for f in arg_dict['spatial_size']]
     # hostname_dir = {'dgx1-1': '/raid/tomvars', 'pretzel': '/raid/tom', 'bd0795ec38f7': '/data2/tom'}
     # if args.checkpoint != "null" and args.checkpoint is not None:
     #     args.checkpoint = args.checkpoint.replace('/raid/tomvars', hostname_dir[os.uname().nodename])

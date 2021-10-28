@@ -413,3 +413,58 @@ def inference_crossmoda(args, p, model, whole_volume_dataset, iteration=0, prefi
             performance_compared_to_ema = evaluate(args=args, preds=preds, targets=preds_ema, prefix='diff_to_ema_',
                                                  metrics=['per_pixel_diff'])
             return performance_supervised, performance_i, performance_compared_to_0, performance_compared_to_ema
+        
+def patch_based_inference(args, model, inference_dir):
+    transforms_list = [
+        LoadImaged(keys=['inputs', 'labels']),
+        Orientationd(keys=['inputs', 'labels'], axcodes='RAS'),
+        Spacingd(keys=['inputs'], pixdim=[1.0, 1.0, 1.0], mode='bilinear'),
+        Spacingd(keys=['labels'], pixdim=[1.0, 1.0, 1.0], mode='nearest'),
+        CopyItemsd(keys=['labels'], times=1, names=['weight_map']),
+        AddChanneld(keys=['inputs', 'weight_map', 'labels']),
+#         Lambdad(keys='weight_map', func=reweight_map),
+        RandWeightedCropd(keys=['inputs', 'labels'],
+                          w_key='weight_map',
+                          spatial_size=spatial_size, num_samples=2),
+        #SpatialCropd(keys=['inputs', 'labels'], roi_center=(127, 138), roi_size=(96, 96)),
+        ScaleIntensityd(keys=['inputs'], minv=0.0, maxv=1.0),
+#         SqueezeDimd(keys=['inputs', 'labels'], dim=0),
+    ]
+    pass
+
+def slice_based_inference(model, output_path, whole_volume_path, files_df, subject_id, batch_size=10):
+    """
+    Inner loop function to run inference on a single subject
+    """
+    subject_files_df = files_df[files_df['subject_id'] == subject_id]
+    subject_files_df = subject_files_df.sort_values(by='slice_index')
+    monai_data_list = [{'inputs': row['flair_path'],
+                    'labels': row['label_path']}
+                    for _, row in subject_files_df.iterrows()]
+    transforms = Compose([LoadImaged(keys=['inputs', 'labels']),
+                      Orientationd(keys=['inputs', 'labels'], axcodes='RAS'),
+                      AddChanneld(keys=['inputs', 'labels']),
+                      ToTensord(keys=['inputs', 'labels']),
+                      ResizeWithPadOrCropd(keys=['inputs', 'labels'],
+                                           spatial_size=(256, 256)),
+                      SpatialCropd(keys=['inputs', 'labels'], roi_center=(127, 138), roi_size=(96, 96)),
+                      ScaleIntensityd(keys=['inputs'], minv=0.0, maxv=1.0)
+                     ])
+    individual_subject_dataset = MonaiDataset(data=monai_data_list, transform=transforms)
+    inference_dl = DataLoader(individual_subject_dataset, batch_size=batch_size, shuffle=False)
+    inverse_op = BatchInverseTransform(transform=individual_subject_dataset.transform, loader=inference_dl)
+    final_output = []
+    nifti_saver = NiftiSaver(resample=False)
+    img = nib.load(whole_volume_path)
+    for idx, batch in enumerate(inference_dl):
+        # Need to run inference here
+        outputs, outputs2 = model.inference_func(batch['inputs'].to(model.device))
+        tumour_preds = (torch.sigmoid(outputs) > 0.5).float().detach().cpu()
+        cochlea_preds = (torch.sigmoid(outputs2) > 0.5).float().detach().cpu() * 2.0
+        batch['inputs'] = torch.clamp(tumour_preds + cochlea_preds, min=0, max=2) # hack
+        final_output.append(np.stack(
+            [f['inputs'] for f in inverse_op(batch)]
+        ))
+    volume = np.einsum('ijkl->jkli', np.concatenate(final_output))[:, ::-1, ::-1, ...]
+    nifti_saver = NiftiSaver(output_dir = Path(output_path).parent / 'mni_preds')
+    nifti_saver.save(volume, meta_data={'affine': img.affine, 'filename_or_obj': Path(output_path).name})
