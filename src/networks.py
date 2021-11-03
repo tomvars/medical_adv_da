@@ -383,7 +383,7 @@ def get_3d_retina_unet(spatial_size,
         window: np.array = field(default_factory=lambda: np.array([0, 0, spatial_size[0],
                                                                    spatial_size[0], 0,
                                                                    spatial_size[2]]))
-        detection_nms_threshold: float = 1e-5
+        detection_nms_threshold: float = 1e-5 # Consider changing to 0.1
         model_max_instances_per_batch_element: int = 30 #10 if self.dim == 2 else 30
         model_min_confidence: float = 0.1
         weight_init: str = None

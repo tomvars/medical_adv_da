@@ -1,10 +1,39 @@
 import nibabel as nib
 import numpy as np
+import sys
 import torch
 from functools import partial
 from collections import defaultdict
+from pathlib import Path
+from tqdm import tqdm
 from pairwise_measures import PairwiseMeasures
-from src.utils import apply_transform, non_geometric_augmentations, generate_affine, to_var_gpu, batch_adaptation, soft_dice
+from src.utils import apply_transform,\
+non_geometric_augmentations, \
+generate_affine, to_var_gpu, \
+batch_adaptation, soft_dice, \
+collate_patches_object_detection
+import src.medicaldetectiontoolkit.model_utils as mutils
+from monai.data import GridPatchDataset, PatchIter, DataLoader, decollate_batch
+from monai.data.nifti_saver import NiftiSaver
+from monai.transforms import (LoadImaged,
+                              Lambdad,
+                              Orientationd,
+                              SqueezeDimd,
+                              ToTensord,
+                              Compose,
+                              AddChanneld,
+                              Invertd,
+                              ResizeWithPadOrCropd,
+                              ScaleIntensityd,
+                              SpatialCropd,
+                              BatchInverseTransform,
+                              RandWeightedCropd,
+                              MapLabelValued,
+                              CopyItemsd,
+                              RandAffined,
+                              Spacingd
+                             )
+from monai.inferers.utils import sliding_window_inference
 
 def evaluate(args, preds, targets, prefix,
              metrics=['dice', 'jaccard', 'sensitivity', 'specificity', 'soft_dice',
@@ -32,404 +61,93 @@ def evaluate(args, preds, targets, prefix,
         if 'per_pixel_diff' in metrics:
             output_dict[prefix + 'per_pixel_diff'].append(np.mean(np.abs(ref - pred)))
     return output_dict
-
-def inference_tumour(args, p, model, whole_volume_dataset, iteration=0, prefix='', infer_on=None):
-    """
-    This function should run inference on a set of volumes, save the results, calculate the dice
-    """
-    def save_img(format_spec, identifier, array):
-        img = nib.Nifti1Image(array, np.eye(4))
-        fn = format_spec.format(identifier)
-        nib.save(img, fn)
-        return fn
-
-    with torch.set_grad_enabled(False):
-        model.eval()
-        preds_0, preds_ema = [], []
-        preds, targets = [], []
-        predsAug, predsT = [], []
-        range_of_volumes = range(len(whole_volume_dataset)) if infer_on is None else infer_on
-        print('Evaluating on {} subjects'.format(len(range_of_volumes)))
-        for index in range(len(range_of_volumes)):
-            print('Evaluating on subject {}'.format(str(index)))
-            inputs, labels = whole_volume_dataset[index]
-            #TODO: inputs is of size (4, 170, 240, 160), need to change inference values accordingly.
-            subj_id = whole_volume_dataset.get_subject_id_from_index(index)
-            targetL = np.zeros(shape=(args.paddtarget, args.paddtarget, inputs.shape[-1]))
-            outputS = np.zeros(shape=(args.paddtarget, args.paddtarget, inputs.shape[-1]))
-            inputsS = np.zeros(shape=(inputs.shape[0], args.paddtarget, args.paddtarget, inputs.shape[-1]))
-            outputsT = np.zeros(shape=(args.paddtarget, args.paddtarget, inputs.shape[-1]))
-            outputsAug = np.zeros(shape=(args.paddtarget, args.paddtarget, inputs.shape[-1]))
-            for slice_index in np.arange(0, inputs.shape[-1], step=args.batch_size):
-                index_start = slice_index
-                index_end = min(slice_index+args.batch_size, inputs.shape[-1])
-                batch_input = np.einsum('ijkl->lijk', inputs[:, :, :, index_start:index_end])
-                batch_labels = np.einsum('ijk->kij', labels[:, :, index_start:index_end])
-                batch_input = torch.tensor(batch_input)
-                batch_labels = torch.tensor(np.expand_dims(batch_labels, axis=1))
-                batch_input, batch_labels = batch_adaptation(batch_input, batch_labels, args.paddtarget)
-                batch_input, batch_labels = to_var_gpu(batch_input), to_var_gpu(batch_labels)
-                outputs, _, _, _, _, _, _, _, _, _ = model(batch_input)
-                outputs = torch.sigmoid(outputs)
-                if args.method == 'A2':
-                    Theta, Theta_inv = generate_affine(batch_input, degreeFreedom=args.affine_rot_degree,
-                                                      scale=args.affine_scale,
-                                                      shearingScale=args.affine_shearing)
-                    inputstaug = apply_transform(batch_input, Theta)
-                    outputstaug, _, _, _, _, _, _, _, _, _ = model(inputstaug)
-                    outputstaug = torch.sigmoid(outputstaug)
-                    outputs_t = apply_transform(outputs, Theta)
-                elif args.method == 'A4':
-                    batch_trs = batch_input.cpu().numpy()
-                    batch_trs = p.map(partial(non_geometric_augmentations, method='bias', norm_training_images=None),
-                                      np.copy(batch_trs))
-                    batch_trs = p.map(partial(non_geometric_augmentations, method='kspace', norm_training_images=None),
-                                      np.copy(batch_trs))
-                    inputstaug = torch.Tensor(batch_trs).cuda()
-                    outputstaug, _, _, _, _, _, _, _, _, _ = model(inputstaug)
-                    outputstaug = torch.sigmoid(outputstaug)
-                elif args.method in ['A3', 'adversarial', 'mean_teacher']:
-                    batch_trs = batch_input.cpu().numpy()
-                    batch_trs = p.map(partial(non_geometric_augmentations, method='bias', norm_training_images=None),
-                                      np.copy(batch_trs))
-                    batch_trs = p.map(partial(non_geometric_augmentations, method='kspace', norm_training_images=None),
-                                      np.copy(batch_trs))
-                    inputstaug = torch.Tensor(batch_trs).cuda()
-                    Theta, Theta_inv = generate_affine(inputstaug, degreeFreedom=args.affine_rot_degree,
-                                                      scale=args.affine_scale,
-                                                      shearingScale=args.affine_shearing)
-                    inputstaug = apply_transform(inputstaug, Theta)
-                    outputstaug, _, _, _, _, _, _, _, _, _ = model(inputstaug)
-                    outputstaug = torch.sigmoid(outputstaug)
-                    outputs_t = apply_transform(outputs, Theta)
-                outputS[:, :, index_start:index_end] = np.einsum('ijk->jki',
-                                                                 np.squeeze(outputs.detach().cpu().numpy()))
-                targetL[:, :, index_start:index_end] = np.einsum('ijk->jki',
-                                                                 np.squeeze(batch_labels.detach().cpu().numpy()))
-                inputsS[:, :, :, index_start:index_end] = np.einsum('ijkl->jkli', np.squeeze(batch_input.detach().cpu().numpy()))
-                if args.method in ['A2', 'A3', 'A4', 'adversarial', 'mean_teacher']:
-                    outputsAug[:, :, index_start:index_end] = np.einsum('ijk->jki',
-                                                                      np.squeeze(outputstaug.detach().cpu().numpy()))
-                    if args.method in ['A3', 'A2', 'adversarial', 'mean_teacher']:
-                        outputsT[:, :, index_start:index_end] = np.einsum('ijk->jki',
-                                                                          np.squeeze(outputs_t.detach().cpu().numpy()))
-            format_spec = '{}_{}_{}_{}_{}_{}_'.format(prefix, args.method, args.source, args.target, args.tag,
-                                                      iteration) + \
-                          '_{}_' + f'{str(subj_id)}.nii.gz'
-            ema_format_spec = '{}_{}_{}_{}_{}_{}_'.format(prefix, args.method, args.source,
-                                                          args.target, args.tag, 'EMA') + \
-                              '_{}_' + f'{str(subj_id)}.nii.gz'
-            if iteration == 0:
-                fn = save_img(format_spec=ema_format_spec, identifier='Prediction', array=outputS)
-            else:
-                pred_zero = f'{prefix}_{args.method}_{args.source}_{args.target}' \
-                            f'_{args.tag}_0__Prediction_{str(subj_id)}.nii.gz'
-                outputs_0 = nib.load(pred_zero).get_data()
-                preds_0.append(outputs_0)
-                alpha = 0.9
-                pred_ema_filename = f'{prefix}_{args.method}_{args.source}_{args.target}' \
-                                    f'_{args.tag}_EMA__Prediction_{str(subj_id)}.nii.gz'
-                pred_ema_t_minus_one = nib.load(pred_ema_filename).get_data()
-                pred_ema = alpha * outputS + (1 - alpha) * pred_ema_t_minus_one
-                preds_ema.append(pred_ema)
-                save_img(format_spec=ema_format_spec, identifier='Prediction', array=pred_ema)
-            save_img(format_spec=format_spec, identifier='Prediction', array=outputS)
-            save_img(format_spec=format_spec, identifier='target', array=targetL)
-            for idx, modality in enumerate(['flair', 't1c', 't1', 't2']):
-                save_img(format_spec=format_spec, identifier='{}_mri'.format(modality), array=inputsS[idx, ...])
-            preds.append(outputS)
-            targets.append(targetL)
-            if args.method in ['A2', 'A3', 'A4', 'adversarial', 'mean_teacher']:
-                predsAug.append(outputsAug)
-                save_img(format_spec=format_spec, identifier='Aug', array=outputsAug)
-                if args.method in ['A2', 'A3', 'adversarial', 'mean_teacher']:
-                    predsT.append(outputsT)
-                    save_img(format_spec=format_spec, identifier='Transformed', array=outputsT)
-        performance_supervised = evaluate(args=args, preds=preds, targets=targets, prefix='supervised_')
-        performance_i = None
-        if args.method in ['A2', 'A3', 'A4', 'adversarial', 'mean_teacher']:
-            if args.method in ['A2', 'A3', 'adversarial', 'mean_teacher']:
-                performance_i = evaluate(args=args, preds=predsAug, targets=predsT, prefix='consistency_')
-            else:
-                performance_i = evaluate(args=args, preds=predsAug, targets=preds, prefix='consistency_')
-        if iteration == 0:
-            return performance_supervised, performance_i, None, None
-        else:
-            performance_compared_to_0 = evaluate(args=args, preds=preds, targets=preds_0, prefix='diff_to_0_',
-                                                 metrics=['per_pixel_diff'])
-            performance_compared_to_ema = evaluate(args=args, preds=preds, targets=preds_ema, prefix='diff_to_ema_',
-                                                 metrics=['per_pixel_diff'])
-            return performance_supervised, performance_i, performance_compared_to_0, performance_compared_to_ema
-
-
-def inference_ms(args, p, model, whole_volume_dataset, iteration=0, prefix='', infer_on=None, eval_diff=True):
-    """
-    This function should run inference on a set of volumes, save the results, calculate the dice
-    """
-    def save_img(format_spec, identifier, array):
-        img = nib.Nifti1Image(array, np.eye(4))
-        fn = format_spec.format(identifier)
-        nib.save(img, fn)
-        return fn
-
-    with torch.set_grad_enabled(False):
-        model.eval()
-        preds_0, preds_ema = [], []
-        preds, targets = [], []
-        predsAug, predsT = [], []
-        print('Evaluating on {} subjects'.format(len(whole_volume_dataset)))
-        range_of_volumes = range(len(whole_volume_dataset)) if infer_on is None else infer_on
-        for index in range_of_volumes:
-            print('Evaluating on subject {}'.format(str(index)))
-            inputs, labels = whole_volume_dataset[index]
-            subj_id = whole_volume_dataset.get_subject_id_from_index(index)
-            targetL = np.zeros(shape=(args.paddtarget, args.paddtarget, inputs.shape[2]))
-            outputS = np.zeros(shape=(args.paddtarget, args.paddtarget, inputs.shape[2]))
-            inputsS = np.zeros(shape=(args.paddtarget, args.paddtarget, inputs.shape[2]))
-            outputsT = np.zeros(shape=(args.paddtarget, args.paddtarget, inputs.shape[2]))
-            outputsAug = np.zeros(shape=(args.paddtarget, args.paddtarget, inputs.shape[2]))
-            for slice_index in np.arange(0, inputs.shape[2], step=args.batch_size):
-                index_start = slice_index
-                index_end = min(slice_index+args.batch_size, inputs.shape[2])
-                batch_input = np.einsum('ijk->kij', inputs[:, :, index_start:index_end])
-                batch_labels = np.einsum('ijk->kij', labels[:, :, index_start:index_end])
-                batch_input = torch.tensor(np.expand_dims(batch_input, axis=1).astype(np.float32))
-                batch_labels = torch.tensor(np.expand_dims(batch_labels, axis=1))
-                batch_input, batch_labels = batch_adaptation(batch_input, batch_labels, args.paddtarget)
-                batch_input, batch_labels = to_var_gpu(batch_input), to_var_gpu(batch_labels)
-                outputs, _, _, _, _, _, _, _, _, _ = model(batch_input)
-                outputs = torch.sigmoid(outputs)
-                if args.method == 'A2':
-                    Theta, Theta_inv = generate_affine(batch_input, degreeFreedom=args.affine_rot_degree,
-                                                      scale=args.affine_scale,
-                                                      shearingScale=args.affine_shearing)
-                    inputstaug = apply_transform(batch_input, Theta)
-                    outputstaug, _, _, _, _, _, _, _, _, _ = model(inputstaug)
-                    outputstaug = torch.sigmoid(outputstaug)
-                    outputs_t = apply_transform(outputs, Theta)
-                elif args.method == 'A4':
-                    batch_trs = batch_input.cpu().numpy()
-                    batch_trs = p.map(partial(non_geometric_augmentations, method='bias', norm_training_images=None),
-                                      np.copy(batch_trs))
-                    batch_trs = p.map(partial(non_geometric_augmentations, method='kspace', norm_training_images=None),
-                                      np.copy(batch_trs))
-                    inputstaug = torch.Tensor(batch_trs).cuda()
-                    outputstaug, _, _, _, _, _, _, _, _, _ = model(inputstaug)
-                    outputstaug = torch.sigmoid(outputstaug)
-                elif args.method in ['A3', 'adversarial', 'mean_teacher']:
-                    batch_trs = batch_input.cpu().numpy()
-                    batch_trs = p.map(partial(non_geometric_augmentations, method='bias', norm_training_images=None),
-                                      np.copy(batch_trs))
-                    batch_trs = p.map(partial(non_geometric_augmentations, method='kspace', norm_training_images=None),
-                                      np.copy(batch_trs))
-                    inputstaug = torch.Tensor(batch_trs).cuda()
-                    Theta, Theta_inv = generate_affine(inputstaug, degreeFreedom=args.affine_rot_degree,
-                                                      scale=args.affine_scale,
-                                                      shearingScale=args.affine_shearing)
-                    inputstaug = apply_transform(inputstaug, Theta)
-                    outputstaug, _, _, _, _, _, _, _, _, _ = model(inputstaug)
-                    outputstaug = torch.sigmoid(outputstaug)
-                    outputs_t = apply_transform(outputs, Theta)
-                outputS[:, :, index_start:index_end] = np.einsum('ijk->jki', outputs.detach().cpu().numpy()[:, 0, ...])
-                targetL[:, :, index_start:index_end] = np.einsum('ijk->jki', batch_labels.detach().cpu().numpy()[:, 0, ...])
-                inputsS[:, :, index_start:index_end] = np.einsum('ijk->jki', batch_input.detach().cpu().numpy()[:, 0, ...])
-                if args.method in ['A2', 'A3', 'A4', 'adversarial', 'mean_teacher']:
-                    outputsAug[:, :, index_start:index_end] = np.einsum('ijk->jki',
-                                                                        outputstaug.detach().cpu().numpy()[:, 0, ...])
-                    if args.method in ['A3', 'A2', 'adversarial', 'mean_teacher']:
-                        outputsT[:, :, index_start:index_end] = np.einsum('ijk->jki',
-                                                                          outputs_t.detach().cpu().numpy()[:, 0, ...])
-            format_spec = '{}_{}_{}_{}_{}_{}_'.format(prefix, args.method, args.source, args.target, args.tag, iteration) +\
-                      '_{}_' + f'{str(subj_id)}.nii.gz'
-            ema_format_spec = '{}_{}_{}_{}_{}_{}_'.format(prefix, args.method, args.source,
-                                                          args.target, args.tag, 'EMA') + \
-                              '_{}_' + f'{str(subj_id)}.nii.gz'
-            if iteration == 0:
-                save_img(format_spec=ema_format_spec, identifier='Prediction', array=outputS)
-            elif eval_diff and iteration > 0:
-                pred_zero = f'{prefix}_{args.method}_{args.source}_{args.target}' \
-                            f'_{args.tag}_{0}__Prediction_{str(subj_id)}.nii.gz'
-                outputs_0 = nib.load(pred_zero).get_data()
-                preds_0.append(outputs_0)
-                alpha = 0.9
-                pred_ema_filename = f'{prefix}_{args.method}_{args.source}_{args.target}' \
-                                    f'_{args.tag}_EMA__Prediction_{str(subj_id)}.nii.gz'
-                print(pred_ema_filename)
-                pred_ema_t_minus_one = nib.load(pred_ema_filename).get_data()
-                pred_ema = alpha * outputS + (1 - alpha) * pred_ema_t_minus_one
-                preds_ema.append(pred_ema)
-                save_img(format_spec=ema_format_spec, identifier='Prediction', array=pred_ema)
-            else:
-                print('Not computing diff')
-            save_img(format_spec=format_spec, identifier='Prediction', array=outputS)
-            save_img(format_spec=format_spec, identifier='target', array=targetL)
-            save_img(format_spec=format_spec, identifier='mri', array=inputsS)
-            preds.append(outputS)
-            targets.append(targetL)
-            if args.method in ['A2', 'A3', 'A4', 'adversarial', 'mean_teacher']:
-                predsAug.append(outputsAug)
-                save_img(format_spec=format_spec, identifier='Aug', array=outputsAug)
-                if args.method in ['A2', 'A3', 'adversarial', 'mean_teacher']:
-                    predsT.append(outputsT)
-                    save_img(format_spec=format_spec, identifier='Transformed', array=outputsT)
-        performance_supervised = evaluate(args=args, preds=preds, targets=targets, prefix='supervised_')
-        performance_i = None
-        if args.method in ['A2', 'A3', 'A4', 'adversarial', 'mean_teacher']:
-            if args.method in ['A2', 'A3', 'adversarial', 'mean_teacher']:
-                performance_i = evaluate(args=args, preds=predsAug, targets=predsT, prefix='consistency_')
-            else:
-                performance_i = evaluate(args=args, preds=predsAug, targets=preds, prefix='consistency_')
-        if iteration == 0:
-            return performance_supervised, performance_i, None, None
-        else:
-            performance_compared_to_0 = evaluate(args=args, preds=preds, targets=preds_0, prefix='diff_to_0_',
-                                                 metrics=['per_pixel_diff'])
-            performance_compared_to_ema = evaluate(args=args, preds=preds, targets=preds_ema, prefix='diff_to_ema_',
-                                                 metrics=['per_pixel_diff'])
-            return performance_supervised, performance_i, performance_compared_to_0, performance_compared_to_ema
         
-def inference_crossmoda(args, p, model, whole_volume_dataset, iteration=0, prefix='', infer_on=None, eval_diff=True):
-    """
-    This function should run inference on a set of volumes, save the results, calculate the dice
-    """
-    def save_img(format_spec, identifier, array):
-        img = nib.Nifti1Image(array, np.eye(4))
-        fn = format_spec.format(identifier)
-        nib.save(img, fn)
-        return fn
-
-    with torch.set_grad_enabled(False):
-        model.eval()
-        preds_0, preds_ema = [], []
-        preds, targets = [], []
-        predsAug, predsT = [], []
-        print('Evaluating on {} subjects'.format(len(whole_volume_dataset)))
-        range_of_volumes = range(len(whole_volume_dataset)) if infer_on is None else infer_on
-        for index in range_of_volumes:
-            print('Evaluating on subject {}'.format(str(index)))
-            inputs, labels = whole_volume_dataset[index]
-            subj_id = whole_volume_dataset.get_subject_id_from_index(index)
-            targetL = np.zeros(shape=(args.paddtarget, args.paddtarget, inputs.shape[2]))
-            outputS = np.zeros(shape=(args.paddtarget, args.paddtarget, inputs.shape[2]))
-            inputsS = np.zeros(shape=(args.paddtarget, args.paddtarget, inputs.shape[2]))
-            outputsT = np.zeros(shape=(args.paddtarget, args.paddtarget, inputs.shape[2]))
-            outputsAug = np.zeros(shape=(args.paddtarget, args.paddtarget, inputs.shape[2]))
-            for slice_index in np.arange(0, inputs.shape[2], step=args.batch_size):
-                index_start = slice_index
-                index_end = min(slice_index+args.batch_size, inputs.shape[2])
-                batch_input = np.einsum('ijk->kij', inputs[:, :, index_start:index_end])
-                batch_labels = np.einsum('ijk->kij', labels[:, :, index_start:index_end])
-                batch_input = torch.tensor(np.expand_dims(batch_input, axis=1).astype(np.float32))
-                batch_labels = torch.tensor(np.expand_dims(batch_labels, axis=1))
-                batch_input, batch_labels = batch_adaptation(batch_input, batch_labels, args.paddtarget)
-                batch_input, batch_labels = to_var_gpu(batch_input), to_var_gpu(batch_labels)
-                outputs, _, _, _, _, _, _, _, _, _, _ = model(batch_input)
-                outputs = torch.sigmoid(outputs)
-                if args.method == 'A2':
-                    Theta, Theta_inv = generate_affine(batch_input, degreeFreedom=args.affine_rot_degree,
-                                                      scale=args.affine_scale,
-                                                      shearingScale=args.affine_shearing)
-                    inputstaug = apply_transform(batch_input, Theta)
-                    outputstaug, _, _, _, _, _, _, _, _, _ = model(inputstaug)
-                    outputstaug = torch.sigmoid(outputstaug)
-                    outputs_t = apply_transform(outputs, Theta)
-                elif args.method == 'A4':
-                    batch_trs = batch_input.cpu().numpy()
-                    batch_trs = p.map(partial(non_geometric_augmentations, method='bias', norm_training_images=None),
-                                      np.copy(batch_trs))
-                    batch_trs = p.map(partial(non_geometric_augmentations, method='kspace', norm_training_images=None),
-                                      np.copy(batch_trs))
-                    inputstaug = torch.Tensor(batch_trs).cuda()
-                    outputstaug, _, _, _, _, _, _, _, _, _, _ = model(inputstaug)
-                    outputstaug = torch.sigmoid(outputstaug)
-                elif args.method in ['A3', 'adversarial', 'mean_teacher']:
-                    batch_trs = batch_input.cpu().numpy()
-                    batch_trs = p.map(partial(non_geometric_augmentations, method='bias', norm_training_images=None),
-                                      np.copy(batch_trs))
-                    batch_trs = p.map(partial(non_geometric_augmentations, method='kspace', norm_training_images=None),
-                                      np.copy(batch_trs))
-                    inputstaug = torch.Tensor(batch_trs).cuda()
-                    Theta, Theta_inv = generate_affine(inputstaug, degreeFreedom=args.affine_rot_degree,
-                                                      scale=args.affine_scale,
-                                                      shearingScale=args.affine_shearing)
-                    inputstaug = apply_transform(inputstaug, Theta)
-                    outputstaug, _, _, _, _, _, _, _, _, _, _ = model(inputstaug)
-                    outputstaug = torch.sigmoid(outputstaug)
-                    outputs_t = apply_transform(outputs, Theta)
-                outputS[:, :, index_start:index_end] = np.einsum('ijk->jki', outputs.detach().cpu().numpy()[:, 0, ...])
-                targetL[:, :, index_start:index_end] = np.einsum('ijk->jki', batch_labels.detach().cpu().numpy()[:, 0, ...])
-                inputsS[:, :, index_start:index_end] = np.einsum('ijk->jki', batch_input.detach().cpu().numpy()[:, 0, ...])
-                if args.method in ['A2', 'A3', 'A4', 'adversarial', 'mean_teacher']:
-                    outputsAug[:, :, index_start:index_end] = np.einsum('ijk->jki',
-                                                                        outputstaug.detach().cpu().numpy()[:, 0, ...])
-                    if args.method in ['A3', 'A2', 'adversarial', 'mean_teacher']:
-                        outputsT[:, :, index_start:index_end] = np.einsum('ijk->jki',
-                                                                          outputs_t.detach().cpu().numpy()[:, 0, ...])
-            format_spec = '{}_{}_{}_{}_{}_{}_'.format(prefix, args.method, args.source, args.target, args.tag, iteration) +\
-                      '_{}_' + f'{str(subj_id)}.nii.gz'
-            ema_format_spec = '{}_{}_{}_{}_{}_{}_'.format(prefix, args.method, args.source,
-                                                          args.target, args.tag, 'EMA') + \
-                              '_{}_' + f'{str(subj_id)}.nii.gz'
-            if iteration == 0:
-                save_img(format_spec=ema_format_spec, identifier='Prediction', array=outputS)
-            elif eval_diff and iteration > 0:
-                pred_zero = f'{prefix}_{args.method}_{args.source}_{args.target}' \
-                            f'_{args.tag}_{0}__Prediction_{str(subj_id)}.nii.gz'
-                outputs_0 = nib.load(pred_zero).get_data()
-                preds_0.append(outputs_0)
-                alpha = 0.9
-                pred_ema_filename = f'{prefix}_{args.method}_{args.source}_{args.target}' \
-                                    f'_{args.tag}_EMA__Prediction_{str(subj_id)}.nii.gz'
-                print(pred_ema_filename)
-                pred_ema_t_minus_one = nib.load(pred_ema_filename).get_data()
-                pred_ema = alpha * outputS + (1 - alpha) * pred_ema_t_minus_one
-                preds_ema.append(pred_ema)
-                save_img(format_spec=ema_format_spec, identifier='Prediction', array=pred_ema)
-            else:
-                print('Not computing diff')
-            save_img(format_spec=format_spec, identifier='Prediction', array=outputS)
-            save_img(format_spec=format_spec, identifier='target', array=targetL)
-            save_img(format_spec=format_spec, identifier='mri', array=inputsS)
-            preds.append(outputS)
-            targets.append(targetL)
-            if args.method in ['A2', 'A3', 'A4', 'adversarial', 'mean_teacher']:
-                predsAug.append(outputsAug)
-                save_img(format_spec=format_spec, identifier='Aug', array=outputsAug)
-                if args.method in ['A2', 'A3', 'adversarial', 'mean_teacher']:
-                    predsT.append(outputsT)
-                    save_img(format_spec=format_spec, identifier='Transformed', array=outputsT)
-        performance_supervised = evaluate(args=args, preds=preds, targets=targets, prefix='supervised_')
-        performance_i = None
-        if args.method in ['A2', 'A3', 'A4', 'adversarial', 'mean_teacher']:
-            if args.method in ['A2', 'A3', 'adversarial', 'mean_teacher']:
-                performance_i = evaluate(args=args, preds=predsAug, targets=predsT, prefix='consistency_')
-            else:
-                performance_i = evaluate(args=args, preds=predsAug, targets=preds, prefix='consistency_')
-        if iteration == 0:
-            return performance_supervised, performance_i, None, None
-        else:
-            performance_compared_to_0 = evaluate(args=args, preds=preds, targets=preds_0, prefix='diff_to_0_',
-                                                 metrics=['per_pixel_diff'])
-            performance_compared_to_ema = evaluate(args=args, preds=preds, targets=preds_ema, prefix='diff_to_ema_',
-                                                 metrics=['per_pixel_diff'])
-            return performance_supervised, performance_i, performance_compared_to_0, performance_compared_to_ema
+def patch_based_inference(args, model, inference_dir,
+                          source_dataset, target_dataset):
+    # There needs to be a mapping from args to a transforms list
+    datasets = [ds for ds in [source_dataset, target_dataset] if ds is not None]
+#     if args.task == 'object_detection':
+#         for dataset in datasets:
+#             with torch.no_grad():
+#                 for idx in range(len(dataset)):
+#                     # Get preds on source
+#                     patch_iter = PatchIter(patch_size=args.spatial_size, start_pos=(0, 0, 0), mode='edge')
+#                     grid_patch_dataset = GridPatchDataset(dataset=np.expand_dims(dataset[idx]['inputs'], axis=0),
+#                                                           patch_iter=patch_iter)
+#                     inference_dl = DataLoader(grid_patch_dataset, batch_size=args.batch_size, shuffle=False)
+#                     inverse_op = BatchInverseTransform(transform=dataset.transform, loader=inference_dl)
+#                     # inference loop
+#                     patch_detections = []
+#                     output_img = np.zeros_like(dataset[idx]['inputs'][0])
+#                     output_detections = np.zeros_like(dataset[idx]['inputs'][0])
+#                     output_seg = np.zeros_like(dataset[idx]['inputs'][0])
+#                     with tqdm(total=len(source_dataset), file=sys.stdout) as pbar:
+#                         for grid_inputs, grid_coords in inference_dl:
+#                             pbar.update(1)
+#                             output_dict = model.inference_func(grid_inputs.to(model.device))
+#                             boxes = output_dict['results_dict']['boxes']
+#                             print(inverse_op(grid_inputs).shape)
+#                             for box, grid_coord, inputs in zip(boxes, grid_coords, output_dict['source_inputs']):
+#                                 grid_coord = grid_coord.cpu().numpy()[1:]
+#                                 print(output_img.shape)
+#                                 print(grid_coord)
+#                                 print(inputs.cpu().numpy().shape)
+#                                 output_img[
+#                                     grid_coord[0][0]:grid_coord[0][1],
+#                                     grid_coord[1][0]:grid_coord[1][1],
+#                                     grid_coord[2][0]:grid_coord[2][1]] = inputs.cpu().numpy()
+#                                 detections = [(b['box_coords'], b['box_score']) for b in box]
+#                                 patch_detections += [(grid_coord, detection, box_score) for
+#                                                      detection, box_score in detections]
+#                     detections, scores = collate_patches_object_detection(patch_detections)
+#                     # Now we do NMS!
+# #                     post_nms_detections = mutils.nms_numpy(detections[order], scores[order], 0.5)
+#                     print(dataset[idx]['inputs_meta_dict'])
+#                     print(detections)
+#                     exit()
+    if args.task == 'object_detection':
         
-def patch_based_inference(args, model, inference_dir):
-    transforms_list = [
-        LoadImaged(keys=['inputs', 'labels']),
-        Orientationd(keys=['inputs', 'labels'], axcodes='RAS'),
-        Spacingd(keys=['inputs'], pixdim=[1.0, 1.0, 1.0], mode='bilinear'),
-        Spacingd(keys=['labels'], pixdim=[1.0, 1.0, 1.0], mode='nearest'),
-        CopyItemsd(keys=['labels'], times=1, names=['weight_map']),
-        AddChanneld(keys=['inputs', 'weight_map', 'labels']),
-#         Lambdad(keys='weight_map', func=reweight_map),
-        RandWeightedCropd(keys=['inputs', 'labels'],
-                          w_key='weight_map',
-                          spatial_size=spatial_size, num_samples=2),
-        #SpatialCropd(keys=['inputs', 'labels'], roi_center=(127, 138), roi_size=(96, 96)),
-        ScaleIntensityd(keys=['inputs'], minv=0.0, maxv=1.0),
-#         SqueezeDimd(keys=['inputs', 'labels'], dim=0),
-    ]
+        for dataset in datasets:
+            post_transforms = Compose([Invertd(
+            keys="pred",
+            transform=dataset.transform,
+            orig_keys="inputs",
+            meta_keys="pred_meta_dict",
+            orig_meta_keys="inputs_meta_dict",
+            meta_key_postfix="meta_dict",
+            nearest_interp=False,
+            to_tensor=True)])
+            val_org_loader = DataLoader(dataset, batch_size=1, num_workers=1)
+            nifti_saver_pred = NiftiSaver(output_dir=inference_dir)
+            nifti_saver_img = NiftiSaver(output_dir=inference_dir, output_postfix='img')
+            nifti_saver_lab = NiftiSaver(output_dir=inference_dir, output_postfix='lab')
+            with torch.no_grad():
+                for val_data in val_org_loader:
+                    val_data["pred"] = sliding_window_inference(
+                        inputs=val_data['inputs'].to(model.device),
+                        roi_size=args.spatial_size,
+                        sw_batch_size=args.batch_size,
+                        predictor=partial(model.inference_func, mode='box_out'),
+                    )
+                    val_data = [i for i in decollate_batch(val_data)]
+                    nifti_saver_pred.save(val_data[0]['pred'],
+                                     meta_data={
+                                         'filename_or_obj': Path(val_data[0]
+                                                                 ['inputs_meta_dict'][
+                                                                     'filename_or_obj']).name})
+                    nifti_saver_lab.save(val_data[0]['labels'],
+                                     meta_data={
+                                         'filename_or_obj': Path(val_data[0]
+                                                                 ['inputs_meta_dict'][
+                                                                     'filename_or_obj']).name})
+                    nifti_saver_img.save(val_data[0]['inputs'],
+                                     meta_data={
+                                         'filename_or_obj': Path(val_data[0]
+                                                                 ['inputs_meta_dict'][
+                                                                     'filename_or_obj']).name})    
+    # Here we call a postprocess_and_save function which has a 2D mode, 3D mode, object detection, segmentation
+    # Each model can have a postprocess_and_save function?
+    
     pass
 
 def slice_based_inference(model, output_path, whole_volume_path, files_df, subject_id, batch_size=10):

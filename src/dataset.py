@@ -25,453 +25,11 @@ from monai.transforms import (LoadImaged,
                               MapLabelValued,
                               CopyItemsd,
                               RandAffined,
-                              Spacingd
+                              Spacingd,
+                              RandSpatialCropd,
+                              RandSpatialCropSamplesd
                              )
 import ants
-
-
-class SliceDataset(Dataset):
-    """
-    This Dataset object expects a data_dir which contains the following structure:
-    data_dir
-    |
-    ----flair
-          |
-          ----- FLAIR_<subject id as int>_slice_<slice id as int>.nii.gz
-          ----- FLAIR_<subject id as int>_slice_<slice id as int>.nii.gz
-          ----- FLAIR_<subject id as int>_slice_<slice id as int>.nii.gz
-    ----labels
-          |
-          ----- wmh_<subject id as int>_slice_<slice id as int>.nii.gz
-          ----- wmh_<subject id as int>_slice_<slice id as int>.nii.gz
-          ----- wmh_<subject id as int>_slice_<slice id as int>.nii.gz
-    """
-
-    def __init__(self, data_dir, paddtarget, slice_selection_method, dataset_split_csv, split,
-                 exclude_slices=None, synthesis=True, tumour_only=False):
-        assert slice_selection_method in ['mask', 'none']
-        assert isinstance(paddtarget, int)
-        assert 'flair' in os.listdir(data_dir)
-        assert 'labels' in os.listdir(data_dir)
-        self.dataset_split_df = pd.read_csv(dataset_split_csv, names=['subject_id', 'split'])
-        self.split = split
-        self.paddtarget = paddtarget
-        self.slice_selection_method = slice_selection_method
-        self.synthesis = synthesis
-        flair_filenames = os.listdir(os.path.join(data_dir, 'flair'))
-        subject_ids = [x.split('_slice')[0] for x in flair_filenames]
-        slice_idx_arr = [int(x.split('_')[3].replace('.nii.gz', '')) for x in flair_filenames]
-        label_paths = [os.path.join(data_dir, 'labels', x.replace('FLAIR', 'wmh')) for x in flair_filenames]
-        flair_paths = [os.path.join(data_dir, 'flair', x) for x in flair_filenames]
-        assert all([isinstance(x, int) for x in slice_idx_arr])
-        self.files_df = pd.DataFrame(
-            data=[(subj, slice_idx, fp, lp) for subj, slice_idx, fp, lp in zip(subject_ids, slice_idx_arr,
-                                                                               label_paths, flair_paths)],
-            columns=['subject_id', 'slice_index', 'label_path', 'flair_path']
-        )
-        if exclude_slices is not None:
-            self.files_df = self.files_df[~self.files_df['slice_index'].isin(exclude_slices)]
-        # Apply split filter to images
-        images_to_use = self.dataset_split_df[self.dataset_split_df['split'] == self.split]['subject_id'].values
-        self.files_df = self.files_df[self.files_df['subject_id'].isin(images_to_use)]
-
-    def __getitem__(self, index):
-        flair_filepath = self.files_df['flair_path'].values[index]
-        label_filepath = self.files_df['label_path'].values[index]
-        flair_slice = nib.load(flair_filepath).get_data()
-        label_slice = nib.load(label_filepath).get_data()
-        
-        batch = {'inputs': torch.tensor(flair_slice).unsqueeze(dim=0).unsqueeze(dim=1).to(torch.float),
-                 'labels': torch.tensor(label_slice).unsqueeze(dim=0).unsqueeze(dim=1).to(torch.float)}
-        batch['inputs'] = to_var_gpu(batch['inputs'][:, 0, ...])
-        batch['labels'] = to_var_gpu(batch['labels'][:, 0, ...])
-        return batch
-
-    def __len__(self):
-        return len(self.files_df)
-
-    def get_slice_indices_for_subject_ids(self, subject_ids):
-        return self.files_df[self.files_df['subject_id'].isin(subject_ids)].index.values
-
-
-class WholeVolumeDataset(Dataset):
-    """
-        This Dataset object expects a data_dir which contains the following structure:
-        data_dir
-        |
-        ----flair
-              |
-              ----- FLAIR_<subject id as int>.nii.gz
-              ----- FLAIR_<subject id as int>.nii.gz
-              ----- FLAIR_<subject id as int>.nii.gz
-        ----labels
-              |
-              ----- wmh_<subject id as int>.nii.gz
-              ----- wmh_<subject id as int>.nii.gz
-              ----- wmh_<subject id as int>.nii.gz
-        """
-
-    def __init__(self, data_dir, paddtarget, dataset_split_csv, split, synthesis=True, tumour_only=False):
-        assert isinstance(paddtarget, int)
-        assert 'flair' in os.listdir(data_dir)
-        assert 'labels' in os.listdir(data_dir)
-        self.dataset_split_df = pd.read_csv(dataset_split_csv, names=['subject_id', 'split'])
-        self.split = split
-        flair_filenames = os.listdir(os.path.join(data_dir, 'flair'))
-        subject_ids = np.array([x.replace('.nii.gz', '') for x in flair_filenames])
-        flair_paths = [os.path.join(data_dir, 'flair', x) for x in flair_filenames]
-        label_paths = [os.path.join(data_dir, 'labels', x.replace('FLAIR', 'wmh')) for x in flair_filenames]
-        self.files_df = pd.DataFrame(
-            data=[(subj, fp, lp) for subj, fp, lp in zip(subject_ids, label_paths, flair_paths)],
-            columns=['subject_id', 'label_path', 'flair_path']
-        )
-        # Apply split filter to images
-        images_to_use = self.dataset_split_df[self.dataset_split_df['split'] == self.split]['subject_id'].values
-        self.files_df = self.files_df[self.files_df['subject_id'].isin(images_to_use)]
-
-    def __getitem__(self, index):
-        flair_filepath = self.files_df['flair_path'].values[index]
-        label_filepath = self.files_df['label_path'].values[index]
-        inputs = nib.load(flair_filepath).get_data()
-        labels = nib.load(label_filepath).get_data()
-#        batch = {'inputs': inputs, 'labels': labels}
-        return inputs, labels
-
-    def __len__(self):
-        return len(self.files_df)
-
-    def get_subject_id_from_index(self, index):
-        return self.files_df[
-            self.files_df['flair_path'] == self.files_df['flair_path'].values[index]]['subject_id'].values[0]
-
-class WholeVolumeDatasetTumour(Dataset):
-    """
-        This Dataset object expects a data_dir which contains the following structure:
-        data_dir
-        |
-        ----flair
-              |
-              ----- FLAIR_<subject id as int>.nii.gz
-              ----- FLAIR_<subject id as int>.nii.gz
-              ----- FLAIR_<subject id as int>.nii.gz
-        ----T1c
-              |
-              ----- T1c_<subject id as int>.nii.gz
-              ----- T1c_<subject id as int>.nii.gz
-              ----- T1c_<subject id as int>.nii.gz
-        ----T1
-              |
-              ----- T1_<subject id as int>.nii.gz
-              ----- T1_<subject id as int>.nii.gz
-              ----- T1_<subject id as int>.nii.gz
-        ----T2
-              |
-              ----- T2_<subject id as int>.nii.gz
-              ----- T2_<subject id as int>.nii.gz
-              ----- T2_<subject id as int>.nii.gz
-        ----labels
-              |
-              ----- bin_<subject id as int>.nii.gz
-              ----- bin_<subject id as int>.nii.gz
-              ----- bin_<subject id as int>.nii.gz
-        """
-    def __init__(self, data_dir, paddtarget, dataset_split_csv, split, tumour_only=False):
-        assert isinstance(paddtarget, int)
-        assert 'flair' in os.listdir(data_dir)
-        assert 'labels' in os.listdir(data_dir)
-        subject_id_arr = np.array(['_'.join(x.split('_')[1:]).replace('.nii.gz', '') for x in os.listdir(os.path.join(data_dir, 'flair'))])
-        self.dataset_split_df = pd.read_csv(dataset_split_csv, names=['subject_id', 'split'], dtype={'subject_id': str})
-        self.split = split
-        self.tumour_only = tumour_only
-        flair_paths = [os.path.join(data_dir, 'flair', 'FLAIR_' + str(id) + '.nii.gz') for id in subject_id_arr]
-        t1c_paths = [os.path.join(data_dir, 't1c', 'T1c_' + str(id) + '.nii.gz') for id in subject_id_arr]
-        t1_paths = [os.path.join(data_dir, 't1', 'T1_' + str(id) + '.nii.gz') for id in subject_id_arr]
-        t2_paths = [os.path.join(data_dir, 't2', 'T2_' + str(id) + '.nii.gz') for id in subject_id_arr]
-        label_dir = 'labels' if not tumour_only else 'labels_tumour_only'
-        label_paths = [os.path.join(data_dir, label_dir, 'bin_' + str(id) + '.nii.gz') for id in subject_id_arr]
-
-        self.files_df = pd.DataFrame(
-            data=[tup for tup in zip(subject_id_arr, label_paths, flair_paths, t1c_paths, t1_paths, t2_paths)],
-            columns=['subject_id', 'label_path', 'flair_path', 't1c_path', 't1_path', 't2_path']
-        )
-        # Apply split filter to images
-        images_to_use = self.dataset_split_df[self.dataset_split_df['split'] == self.split]['subject_id'].values
-        self.files_df = self.files_df[self.files_df['subject_id'].isin(images_to_use)]
-
-    def __getitem__(self, index):
-        flair_filepath = self.files_df['flair_path'].values[index]
-        t1c_filepath = self.files_df['t1c_path'].values[index]
-        t1_filepath = self.files_df['t1_path'].values[index]
-        t2_filepath = self.files_df['t2_path'].values[index]
-        label_filepath = self.files_df['label_path'].values[index]
-        flair = nib.load(flair_filepath).get_data()
-        t1c = nib.load(t1c_filepath).get_data()
-        t1 = nib.load(t1_filepath).get_data()
-        t2 = nib.load(t2_filepath).get_data()
-        labels = nib.load(label_filepath).get_data()
-        inputs = np.stack([flair, t1c, t1, t2], axis=0)
-        batch = {'inputs': inputs, 'labels': labels}
-        batch['inputs'] = to_var_gpu(batch['inputs'][:, 0, ...])
-        batch['labels'] = to_var_gpu(batch['labels'][:, 0, ...])
-        return batch
-
-    def __len__(self):
-        return len(self.files_df)
-
-    def get_subject_id_from_index(self, index):
-        return self.files_df[
-            self.files_df['flair_path'] == self.files_df['flair_path'].values[index]]['subject_id'].values[0]
-
-
-class SliceDatasetTumour(Dataset):
-    """
-    This Dataset object expects a data_dir which contains the following structure:
-    data_dir
-    |
-    ----flair
-          |
-          ----- FLAIR_<subject id as int>_slice_<slice id as int>.nii.gz
-          ----- FLAIR_<subject id as int>_slice_<slice id as int>.nii.gz
-          ----- FLAIR_<subject id as int>_slice_<slice id as int>.nii.gz
-    ----T1c
-          |
-          ----- T1c_<subject id as int>_slice_<slice id as int>.nii.gz
-          ----- T1c_<subject id as int>_slice_<slice id as int>.nii.gz
-          ----- T1c_<subject id as int>_slice_<slice id as int>.nii.gz
-    ----T1
-          |
-          ----- T1_<subject id as int>_slice_<slice id as int>.nii.gz
-          ----- T1_<subject id as int>_slice_<slice id as int>.nii.gz
-          ----- T1_<subject id as int>_slice_<slice id as int>.nii.gz
-    ----T2
-          |
-          ----- T2_<subject id as int>_slice_<slice id as int>.nii.gz
-          ----- T2_<subject id as int>_slice_<slice id as int>.nii.gz
-          ----- T2_<subject id as int>_slice_<slice id as int>.nii.gz
-    ----labels
-          |
-          ----- bin_<subject id as int>_slice_<slice id as int>.nii.gz
-          ----- bin_<subject id as int>_slice_<slice id as int>.nii.gz
-          ----- bin_<subject id as int>_slice_<slice id as int>.nii.gz
-    """
-    def __init__(self, data_dir, paddtarget, slice_selection_method, dataset_split_csv, split, tumour_only=False):
-        assert slice_selection_method in ['mask', 'none']
-        assert isinstance(paddtarget, int)
-        assert 'flair' in os.listdir(data_dir)
-        assert 'labels' in os.listdir(data_dir)
-        self.paddtarget = paddtarget
-        self.slice_selection_method = slice_selection_method
-        self.dataset_split_df = pd.read_csv(dataset_split_csv, names=['subject_id', 'split'], dtype={'subject_id': str})
-        self.split = split
-        self.tumour_only = tumour_only
-        subject_basenames = ['_'.join(p.split('_')[1:]) for p in os.listdir(os.path.join(data_dir, 'flair'))]
-        label_dir = 'labels' if not tumour_only else 'labels_tumour_only'
-        label_paths = [os.path.join(data_dir, label_dir, 'bin_' + x) for x in subject_basenames]
-        flair_paths = [os.path.join(data_dir, 'flair', 'FLAIR_' + x) for x in subject_basenames]
-        t1c_paths = [os.path.join(data_dir, 't1c', 'T1c_' + x) for x in subject_basenames]
-        t1_paths = [os.path.join(data_dir, 't1', 'T1_' + x) for x in subject_basenames]
-        t2_paths = [os.path.join(data_dir, 't2', 'T2_' + x) for x in subject_basenames]
-        subject_id_arr = [x.split('_')[0] for x in subject_basenames]
-        slice_idx_arr = [int(x.split('_')[2].replace('.nii.gz', '')) for x in subject_basenames]
-        assert all([isinstance(x, int) for x in slice_idx_arr])
-        self.files_df = pd.DataFrame(
-            data=[tp for tp in zip(subject_id_arr, slice_idx_arr, label_paths,
-                                   flair_paths,t1c_paths, t1_paths, t2_paths)],
-            columns=['subject_id', 'slice_index', 'label_path', 'flair_path', 't1c_path', 't1_path', 't2_path']
-        )
-        # Apply split filter to images
-        images_to_use = self.dataset_split_df[self.dataset_split_df['split'] == self.split]['subject_id'].values
-        self.files_df = self.files_df[self.files_df['subject_id'].isin(images_to_use)]
-
-    def __getitem__(self, index):
-        flair_filepath = self.files_df['flair_path'].values[index]
-        t1c_filepath = self.files_df['t1c_path'].values[index]
-        t1_filepath = self.files_df['t1_path'].values[index]
-        t2_filepath = self.files_df['t2_path'].values[index]
-        label_filepath = self.files_df['label_path'].values[index]
-        flair_slice = nib.load(flair_filepath).get_data()
-        t1c_slice = nib.load(t1c_filepath).get_data()
-        t1_slice = nib.load(t1_filepath).get_data()
-        t2_slice = nib.load(t2_filepath).get_data()
-        label_slice = nib.load(label_filepath).get_data()
-        image_slice = np.stack([flair_slice, t1c_slice, t1_slice, t2_slice], axis=0)
-        inputs, labels = batch_adaptation(torch.tensor(image_slice).unsqueeze(dim=0),
-                                          torch.tensor(label_slice), self.paddtarget)
-        batch = {'inputs': inputs, 'labels': labels} 
-        batch['inputs'] = to_var_gpu(batch['inputs'][:, 0, ...])
-        batch['labels'] = to_var_gpu(batch['labels'][:, 0, ...])
-        return batch
-
-    def __len__(self):
-        return len(self.files_df)
-
-    def get_slice_indices_for_subject_ids(self, subject_ids):
-        return self.files_df[self.files_df['subject_id'].isin(subject_ids)].index.values
-
-class WholeVolumeDatasetMS(Dataset):
-    """
-        This Dataset object expects a data_dir which contains the following structure:
-        data_dir
-        |
-        ----flair
-              |
-              ----- FLAIR_<subject id as int>.nii.gz
-              ----- FLAIR_<subject id as int>.nii.gz
-              ----- FLAIR_<subject id as int>.nii.gz
-        ----T1
-              |
-              ----- T1_<subject id as int>.nii.gz
-              ----- T1_<subject id as int>.nii.gz
-              ----- T1_<subject id as int>.nii.gz
-        ----labels
-              |
-              ----- bin_<subject id as int>.nii.gz
-              ----- bin_<subject id as int>.nii.gz
-              ----- bin_<subject id as int>.nii.gz
-        """
-    def __init__(self, data_dir, paddtarget, dataset_split_csv, split):
-        assert isinstance(paddtarget, int)
-        assert 'flair' in os.listdir(data_dir)
-        assert 'labels' in os.listdir(data_dir)
-        subject_id_arr = np.array(['_'.join(x.split('_')[1:]).replace('.nii.gz', '') for x in os.listdir(os.path.join(data_dir, 'flair'))])
-        self.dataset_split_df = pd.read_csv(dataset_split_csv, names=['subject_id', 'split'], dtype={'subject_id': str})
-        self.split = split
-        flair_paths = [os.path.join(data_dir, 'flair', 'FLAIR_' + str(id) + '.nii.gz') for id in subject_id_arr]
-        t1_paths = [os.path.join(data_dir, 't1', 'T1_' + str(id) + '.nii.gz') for id in subject_id_arr]
-        label_paths = [os.path.join(data_dir, 'labels', 'bin_' + str(id) + '.nii.gz') for id in subject_id_arr]
-
-        self.files_df = pd.DataFrame(
-            data=[tup for tup in zip(subject_id_arr, label_paths, flair_paths, t1_paths)],
-            columns=['subject_id', 'label_path', 'flair_path', 't1_path']
-        )
-        # Apply split filter to images
-        images_to_use = self.dataset_split_df[self.dataset_split_df['split'] == self.split]['subject_id'].values
-        self.files_df = self.files_df[self.files_df['subject_id'].isin(images_to_use)]
-
-    def __getitem__(self, index):
-        flair_filepath = self.files_df['flair_path'].values[index]
-        t1_filepath = self.files_df['t1_path'].values[index]
-        label_filepath = self.files_df['label_path'].values[index]
-        flair = nib.load(flair_filepath).get_data()
-        t1 = nib.load(t1_filepath).get_data()
-        labels = nib.load(label_filepath).get_data()
-        inputs = np.stack([flair, t1], axis=0)
-        batch = {'inputs': inputs, 'labels': labels} 
-        batch['inputs'] = to_var_gpu(batch['inputs'][:, 0, ...])
-        batch['labels'] = to_var_gpu(batch['labels'][:, 0, ...])
-        return batch
-
-    def __len__(self):
-        return len(self.files_df)
-
-    def get_subject_id_from_index(self, index):
-        return self.files_df[
-            self.files_df['flair_path'] == self.files_df['flair_path'].values[index]]['subject_id'].values[0]
-
-
-class SliceDatasetMS(Dataset):
-    """
-    This Dataset object expects a data_dir which contains the following structure:
-    data_dir
-    |
-    ----flair
-          |
-          ----- FLAIR_<subject id as int>_slice_<slice id as int>.nii.gz
-          ----- FLAIR_<subject id as int>_slice_<slice id as int>.nii.gz
-          ----- FLAIR_<subject id as int>_slice_<slice id as int>.nii.gz
-    ----T1
-          |
-          ----- T1_<subject id as int>_slice_<slice id as int>.nii.gz
-          ----- T1_<subject id as int>_slice_<slice id as int>.nii.gz
-          ----- T1_<subject id as int>_slice_<slice id as int>.nii.gz
-    ----labels
-          |
-          ----- bin_<subject id as int>_slice_<slice id as int>.nii.gz
-          ----- bin_<subject id as int>_slice_<slice id as int>.nii.gz
-          ----- bin_<subject id as int>_slice_<slice id as int>.nii.gz
-    """
-    def __init__(self, data_dir, paddtarget, slice_selection_method, dataset_split_csv, split):
-        assert slice_selection_method in ['mask', 'none']
-        assert isinstance(paddtarget, int)
-        assert 'flair' in os.listdir(data_dir)
-        assert 'labels' in os.listdir(data_dir)
-        self.paddtarget = paddtarget
-        self.slice_selection_method = slice_selection_method
-        self.dataset_split_df = pd.read_csv(dataset_split_csv, names=['subject_id', 'split'], dtype={'subject_id': str})
-        self.split = split
-        subject_basenames = ['_'.join(p.split('_')[1:]) for p in os.listdir(os.path.join(data_dir, 'flair'))]
-        label_paths = [os.path.join(data_dir, 'labels', 'bin_' + x) for x in subject_basenames]
-        flair_paths = [os.path.join(data_dir, 'flair', 'FLAIR_' + x) for x in subject_basenames]
-        t1_paths = [os.path.join(data_dir, 't1', 'T1_' + x) for x in subject_basenames]
-        subject_id_arr = [x.split('_')[0] for x in subject_basenames]
-        slice_idx_arr = [int(x.split('_')[2].replace('.nii.gz', '')) for x in subject_basenames]
-        assert all([isinstance(x, int) for x in slice_idx_arr])
-        self.files_df = pd.DataFrame(
-            data=[tp for tp in zip(subject_id_arr, slice_idx_arr, label_paths,
-                                   flair_paths, t1_paths)],
-            columns=['subject_id', 'slice_index', 'label_path', 'flair_path', 't1_path']
-        )
-        # Apply split filter to images
-        images_to_use = self.dataset_split_df[self.dataset_split_df['split'] == self.split]['subject_id'].values
-        self.files_df = self.files_df[self.files_df['subject_id'].isin(images_to_use)]
-
-    def __getitem__(self, index):
-        flair_filepath = self.files_df['flair_path'].values[index]
-        t1_filepath = self.files_df['t1_path'].values[index]
-        label_filepath = self.files_df['label_path'].values[index]
-        flair_slice = nib.load(flair_filepath).get_data()
-        t1_slice = nib.load(t1_filepath).get_data()
-        label_slice = nib.load(label_filepath).get_data()
-        image_slice = np.stack([flair_slice, t1_slice], axis=0)
-        inputs, labels = batch_adaptation(torch.tensor(image_slice).unsqueeze(dim=0),
-                                          torch.tensor(label_slice), self.paddtarget)
-        batch = {'inputs': inputs, 'labels': labels} 
-        batch['inputs'] = to_var_gpu(batch['inputs'][:, 0, ...])
-        batch['labels'] = to_var_gpu(batch['labels'][:, 0, ...])
-        return batch
-
-    def __len__(self):
-        return len(self.files_df)
-
-    def get_slice_indices_for_subject_ids(self, subject_ids):
-        return self.files_df[self.files_df['subject_id'].isin(subject_ids)].index.values
-
-class SubsetTumour(WholeVolumeDatasetTumour):
-    r"""
-    Subset of a dataset at specified indices.
-
-    Arguments:
-        dataset (Dataset): The whole Dataset
-        indices (sequence): Indices in the whole set selected for subset
-    """
-    def __init__(self, dataset, indices):
-        self.dataset = dataset
-        self.indices = indices
-
-    def __getitem__(self, idx):
-        return self.dataset[self.indices[idx]]
-
-    def __len__(self):
-        return len(self.indices)
-
-
-class Subset(WholeVolumeDataset):
-    r"""
-    Subset of a dataset at specified indices.
-
-    Arguments:
-        dataset (Dataset): The whole Dataset
-        indices (sequence): Indices in the whole set selected for subset
-    """
-    def __init__(self, dataset, indices):
-        self.dataset = dataset
-        self.indices = indices
-
-    def __getitem__(self, idx):
-        return self.dataset[self.indices[idx]]
-
-    def __len__(self):
-        return len(self.indices)
 
 
 def get_monai_slice_dataset(data_dir, paddtarget, slice_selection_method, dataset_split_csv, split,
@@ -552,7 +110,7 @@ def get_monai_slice_dataset(data_dir, paddtarget, slice_selection_method, datase
 
 def get_monai_patch_dataset(data_dir, paddtarget, slice_selection_method, dataset_split_csv, split,
                             spatial_size=[128, 128, 24], spatial_dims=3, exclude_slices=None,
-                            synthesis=True, tumour_only=False, bounding_boxes=False,
+                            synthesis=True, bounding_boxes=False,
                             return_aug=False, label_mapping=None):
     """
     This function object expects a data_dir which contains the following structure:
@@ -585,7 +143,10 @@ def get_monai_patch_dataset(data_dir, paddtarget, slice_selection_method, datase
         columns=['subject_id', 'label_path', 'flair_path']
     )
     # Apply split filter to images
-    images_to_use = dataset_split_df[dataset_split_df['split'] == split]['subject_id'].values
+    if split in ['train', 'val']:
+        images_to_use = dataset_split_df[dataset_split_df['split'] == split]['subject_id'].values
+    else:
+        images_to_use = dataset_split_df['subject_id'].values
     files_df = files_df[files_df['subject_id'].isin(images_to_use)]
     monai_data_list = [{'inputs': row['flair_path'],
                         'labels': row['label_path']}
@@ -597,18 +158,33 @@ def get_monai_patch_dataset(data_dir, paddtarget, slice_selection_method, datase
     transforms_list = [
         LoadImaged(keys=['inputs', 'labels']),
         Orientationd(keys=['inputs', 'labels'], axcodes='RAS'),
+        AddChanneld(keys=['inputs', 'labels']),
         Spacingd(keys=['inputs'], pixdim=[1.0, 1.0, 1.0], mode='bilinear'),
         Spacingd(keys=['labels'], pixdim=[1.0, 1.0, 1.0], mode='nearest'),
         CopyItemsd(keys=['labels'], times=1, names=['weight_map']),
-        AddChanneld(keys=['inputs', 'weight_map', 'labels']),
-#         Lambdad(keys='weight_map', func=reweight_map),
-        RandWeightedCropd(keys=['inputs', 'labels'],
-                          w_key='weight_map',
-                          spatial_size=spatial_size, num_samples=2),
-        #SpatialCropd(keys=['inputs', 'labels'], roi_center=(127, 138), roi_size=(96, 96)),
-        ScaleIntensityd(keys=['inputs'], minv=0.0, maxv=1.0),
-#         SqueezeDimd(keys=['inputs', 'labels'], dim=0),
+        ScaleIntensityd(keys=['inputs'], minv=0.0, maxv=1.0)
     ]
+    if split in ['train', 'val']:
+#         transforms_list.append(
+#             RandWeightedCropd(keys=['inputs', 'labels'],
+#                           w_key='weight_map',
+#                           spatial_size=spatial_size, num_samples=2))
+        if split == 'train' and not return_aug:
+            # RandAffine when not doing ADA
+            transforms_list.append(RandAffined(
+                    keys=['inputs', 'labels'],
+                    allow_missing_keys=True,
+                    spatial_size=spatial_size,
+                    prob=1.0,
+                    rotate_range=[0, 0, 1.57],
+                    shear_range=0.0,
+                    translate_range=[10, 10, 10],
+                    scale_range=[0.1, 0.1, 0.1],
+            ))
+        transforms_list.append(
+            RandSpatialCropSamplesd(keys=['inputs', 'labels'],
+                          roi_size=spatial_size, num_samples=2, random_size=False))
+
     if isinstance(label_mapping, dict):
         transforms_list.append(MapLabelValued(keys=['labels'],
                                               orig_labels=label_mapping.keys(),

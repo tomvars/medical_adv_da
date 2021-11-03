@@ -17,6 +17,11 @@ from src.utils import bland_altman_loss, dice_soft_loss, ss_loss, generate_affin
 import src.medicaldetectiontoolkit.model_utils as mutils
 from src.medicaldetectiontoolkit.retina_unet import compute_class_loss, compute_bbox_loss, get_results
 
+anchor_params_dict = {
+    'microbleed_3d': (2, 2, 4, 1),
+    'crossmoda_3d': (4, 4, 4, 1),
+}
+
 class SupervisedRetinaUNet3DModel(BaseModel):
     def __init__(self, cf, writer, results_folder, models_folder, tensorboard_folder,
                  run_name, starting_epoch=0):
@@ -27,7 +32,11 @@ class SupervisedRetinaUNet3DModel(BaseModel):
         self.tensorboard_folder = tensorboard_folder
         self.run_name = run_name
         self.starting_epoch = starting_epoch
-        self.retina_unet = get_3d_retina_unet(self.cf.spatial_size)
+        self.retina_unet = get_3d_retina_unet(self.cf.spatial_size,
+                                              base_rpn_anchor_scale_xy=anchor_params_dict[cf.data_task][0],
+                                              base_rpn_anchor_scale_z=anchor_params_dict[cf.data_task][1],
+                                              base_backbone_strides_xy=anchor_params_dict[cf.data_task][2],
+                                              base_backbone_strides_z=anchor_params_dict[cf.data_task][3])
         self.writer = writer
         self.seg_optimizer = optim.SGD(self.retina_unet.parameters(), lr=self.cf.lr, weight_decay=0.01, nesterov=True, momentum=0.9)
         self.scheduler = optim.lr_scheduler.MultiStepLR(self.seg_optimizer, milestones=[20000, 20000], gamma=0.1)
@@ -215,7 +224,46 @@ class SupervisedRetinaUNet3DModel(BaseModel):
                 'results_dict': results_dict
             }
             return postfix_dict, tensorboard_dict
-    
+        
+    def inference_func(self, inference_inputs, mode='seg_out', bbox_thresh=0.3):
+        """
+        Expects inputs as torch tensor
+        
+        mode: if 'seg_out' outputs the segmentation branch output
+              if 'box_out' outputs a segmentation mask of detections
+        """
+        with torch.no_grad():
+            # list of output boxes for monitoring/plotting. each element is a list of boxes per batch element.
+            box_results_list = [[] for _ in range(inference_inputs.shape[0])]
+            detections, class_logits, pred_deltas, seg_logits, fpn_outs = self.retina_unet(inference_inputs)
+            results_dict = get_results(self.retina_unet.cf, inference_inputs.shape,
+                                       detections, seg_logits, box_results_list)
+        output_dict = {
+                'source_inputs': inference_inputs,
+                'source_outputs': F.softmax(seg_logits, dim=1)[:, 1:, ...],
+                'results_dict': results_dict
+            }
+        if mode == 'seg_out':
+            return (F.softmax(seg_logits, dim=1)[:, 1:, ...] > 0.5).to(torch.bool)
+        elif mode == 'box_out':
+            all_bboxes = results_dict['boxes']
+            box_out = []
+            for single_volume_bboxes in all_bboxes:
+                # Size of a single volume
+                output_mask = torch.zeros_like(inference_inputs[0])
+                for detection_idx, b in enumerate(single_volume_bboxes):
+                    if b['box_score'] > bbox_thresh:
+                        # bbox coords in y1, x1, y2, x2, z1, z2 format
+                        bbox_coords = b['box_coords']
+                        # Assign each bbox a unique value
+                        output_mask[bbox_coords[1]:bbox_coords[3],
+                                    bbox_coords[0]:bbox_coords[2],
+                                    bbox_coords[4]:bbox_coords[5]] = detection_idx + 1
+                box_out.append(output_mask)
+            return torch.stack(box_out)
+        else:
+            raise NotImplemented
+
     def tensorboard_logging(self, postfix_dict, tensorboard_dict, split):
         if self.cf.data_task == 'tumour':
             for idx, modality in enumerate(['flair', 't1c', 't1', 't2']):

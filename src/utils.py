@@ -401,4 +401,31 @@ def apply_affine_to_coords(coords, affine):
         raise Exception('Incorrect bbox format, must be of size 4 or 6, size found: {}'.format(coords.size))
 
     return new_coords.astype(int)
+
+def collate_patches_object_detection(patch_detections):
+    """
+    This function expects a list of tuples of
+    (
+        patch_coord: np.array in [[x0, x1], [y0, y1], ([z0, z1])] format,
+        detections: np.array in y0, x0, y1, x1, (z0, z1),
+        box_score: scalar
+    )
+    returns: np.array
+    """
+    # Off-setting by the initial coordinate
+    detections, scores = [], []
+    for grid_coord, detection, score in patch_detections:
+        # x coordinate
+        detection[1] += grid_coord[0][0]
+        detection[3] += grid_coord[0][0]
+        # y coordinate
+        detection[0] += grid_coord[1][0]
+        detection[2] += grid_coord[1][0]
+        if len(grid_coord) == 3:
+            # z coordinate
+            detection[4] += grid_coord[2][0]
+            detection[5] += grid_coord[2][0]
+        detections.append(detection)
+        scores.append(score)
+    return np.array(detections), np.array(scores)
     

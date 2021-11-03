@@ -104,7 +104,9 @@ data_paths = {'dgx1':
                 'epad_swi_whole': '/data2/tom/microbleeds/EPAD_SWI/whole',
                 'valdo_t2s_whole': '/data2/tom/microbleeds/VALDO_T2S/whole',
                 'epad_swi': '/data2/tom/microbleeds/EPAD_SWI/',
-                'valdo_t2s': '/data2/tom/microbleeds/VALDO_T2S/'
+                'valdo_t2s': '/data2/tom/microbleeds/VALDO_T2S/',
+                'rcmb_manual': '/data2/tom/microbleeds/rCMB_manual/',
+                'epad_rcmb_manual_combined': '/data2/tom/microbleeds/EPAD_plus_rCMB_manual/'
                 },
            'bd0795ec38f7': {
                 'brats': '/data2/tom/BRATS/',
