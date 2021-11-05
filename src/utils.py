@@ -238,8 +238,8 @@ def non_geometric_augmentations(inputs, method='kspace', **kwargs):
         raise NotImplementedError
     return layer.layer_op(inputs, None)
 
-def load_default_config(task):
-    assert task in ['ms', 'ms_3d', 'tumour', 'crossmoda', 'crossmoda_3d', 'microbleed', 'microbleed_3d']
+def load_default_config(task, dims):
+    
     config_dict = dict(
         ms=json.load(open('config/default_ms_config.json', 'r')),
         ms_3d=json.load(open('config/default_ms_3d_config.json', 'r')),
@@ -249,7 +249,7 @@ def load_default_config(task):
         microbleed=json.load(open('config/default_microbleed_config.json', 'r')),
         microbleed_3d=json.load(open('config/default_microbleed_3d_config.json', 'r')),
     )
-    return config_dict[task]
+    return config_dict[task + '_3d' if dims==3 else '']
 
 def save_bboxes_for_plotting(writer, img, results_dict, name, iteration):
     """
@@ -315,8 +315,8 @@ def create_bbox_overlap_volume(writer,
         gt_outline = torch.tensor(main_pred_mask_outline).repeat(3, 1, 1, 1)
         gt_mask_outline = torch.tensor(main_pred_mask_outline).repeat(3, 1, 1, 1)
         gt_bboxes = [box['box_coords'] for box in box_results_list[batch_ix] if box.get('box_type', False) == 'gt']
-        pred_bboxes = [(box['box_coords']) for box in boxes[batch_ix] if box.get('box_type', False) != 'gt']
-        if gt_bboxes:
+        pred_bboxes = [(box['box_coords']) for box in boxes[batch_ix] if box.get('box_type', False) == 'det']
+        if gt_bboxes and pred_bboxes:
             ious, _ = mutils.bbox_overlaps_3D(torch.tensor(gt_bboxes),
                                               torch.tensor(pred_bboxes)).max(dim=0)
             # y1, x1, y2, x2, z1, z2
@@ -343,7 +343,7 @@ def create_bbox_overlap_volume(writer,
             gt_outline, gt_mask_outline = plot_bbox(gt_bboxes[0])
             # Need to output a combined mask and a combined coloured mask
             for pred_bbox, iou in zip(pred_bboxes, ious):
-                _, pred_mask_outline = plot_bbox(pred_bbox, cmap='bwr', return_pytorch_mask=False, iou=float(iou))
+                _, pred_mask_outline = plot_bbox(pred_bbox, cmap='bwr', return_pytorch_mask=False, iou=1)
                 main_pred_mask_outline = np.logical_or(main_pred_mask_outline, pred_mask_outline)
         main_pred_outline = plt.get_cmap('bwr')(main_pred_mask_outline.astype(float))[..., :3]
         main_pred_outline = torch.tensor(np.transpose(main_pred_outline, axes=(3, 0, 1, 2)))

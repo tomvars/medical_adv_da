@@ -106,7 +106,8 @@ data_paths = {'dgx1':
                 'epad_swi': '/data2/tom/microbleeds/EPAD_SWI/',
                 'valdo_t2s': '/data2/tom/microbleeds/VALDO_T2S/',
                 'rcmb_manual': '/data2/tom/microbleeds/rCMB_manual/',
-                'epad_rcmb_manual_combined': '/data2/tom/microbleeds/EPAD_plus_rCMB_manual/'
+                'epad_rcmb_manual_combined': '/data2/tom/microbleeds/EPAD_plus_rCMB_manual/',
+                'biobank_covid': '/data2/tom/microbleeds/biobank_covid'
                 },
            'bd0795ec38f7': {
                 'brats': '/data2/tom/BRATS/',

@@ -20,6 +20,8 @@ from monai.transforms import (LoadImaged,
                               ResizeWithPadOrCropd,
                               ScaleIntensityd,
                               SpatialCropd,
+                              CropForegroundd,
+                              CenterSpatialCropd,
                               BatchInverseTransform,
                               RandWeightedCropd,
                               MapLabelValued,
@@ -137,76 +139,88 @@ def get_monai_patch_dataset(data_dir, paddtarget, slice_selection_method, datase
     flair_filenames = os.listdir(os.path.join(data_dir, 'flair'))
     subject_ids = np.array([x.replace('.nii.gz', '') for x in flair_filenames])
     flair_paths = [os.path.join(data_dir, 'flair', x) for x in flair_filenames]
-    label_paths = [os.path.join(data_dir, 'labels', x.replace('FLAIR', 'wmh')) for x in flair_filenames]
-    files_df = pd.DataFrame(
-        data=[(subj, fp, lp) for subj, fp, lp in zip(subject_ids, label_paths, flair_paths)],
-        columns=['subject_id', 'label_path', 'flair_path']
-    )
-    # Apply split filter to images
     if split in ['train', 'val']:
+        label_paths = [os.path.join(data_dir, 'labels', x.replace('FLAIR', 'wmh')) for x in flair_filenames]
+        files_df = pd.DataFrame(
+            data=[(subj, fp, lp) for subj, fp, lp in zip(subject_ids, label_paths, flair_paths)],
+            columns=['subject_id', 'label_path', 'flair_path']
+        )
         images_to_use = dataset_split_df[dataset_split_df['split'] == split]['subject_id'].values
-    else:
-        images_to_use = dataset_split_df['subject_id'].values
-    files_df = files_df[files_df['subject_id'].isin(images_to_use)]
-    monai_data_list = [{'inputs': row['flair_path'],
-                        'labels': row['label_path']}
-                        for _, row in files_df.iterrows()]
-    def reweight_map(weight_map):
-        weight_map[weight_map == 1] = 0.5
-        weight_map[weight_map == 0] = 0.5/weight_map.size
-        return weight_map
-    transforms_list = [
-        LoadImaged(keys=['inputs', 'labels']),
-        Orientationd(keys=['inputs', 'labels'], axcodes='RAS'),
-        AddChanneld(keys=['inputs', 'labels']),
-        Spacingd(keys=['inputs'], pixdim=[1.0, 1.0, 1.0], mode='bilinear'),
-        Spacingd(keys=['labels'], pixdim=[1.0, 1.0, 1.0], mode='nearest'),
-        CopyItemsd(keys=['labels'], times=1, names=['weight_map']),
-        ScaleIntensityd(keys=['inputs'], minv=0.0, maxv=1.0)
-    ]
-    if split in ['train', 'val']:
+        files_df = files_df[files_df['subject_id'].isin(images_to_use)]
+        monai_data_list = [{'inputs': row['flair_path'],
+                            'labels': row['label_path']}
+                            for _, row in files_df.iterrows()]
+        transforms_list = [
+            LoadImaged(keys=['inputs', 'labels']),
+            Orientationd(keys=['inputs', 'labels'], axcodes='RAS'),
+            AddChanneld(keys=['inputs', 'labels']),
+            Spacingd(keys=['inputs'], pixdim=[1.0, 1.0, 1.0], mode='bilinear'),
+            Spacingd(keys=['labels'], pixdim=[1.0, 1.0, 1.0], mode='nearest'),
+            CopyItemsd(keys=['labels'], times=1, names=['weight_map']),
+            CropForegroundd(keys=['inputs', 'labels'], source_key='inputs', margin=5),
+            ScaleIntensityd(keys=['inputs'], minv=0.0, maxv=1.0)
+        ]
+#         if split == 'train' and not return_aug:
+#             # RandAffine when not doing ADA
+#             transforms_list.append(RandAffined(
+#                     keys=['inputs', 'labels'],
+#                     allow_missing_keys=True,
+#                     spatial_size=spatial_size,
+#                     prob=1.0,
+#                     rotate_range=[0, 0, 1.57],
+#                     shear_range=0.0,
+#                     translate_range=[10, 10, 10],
+#                     scale_range=[0.1, 0.1, 0.1],
+#             ))
 #         transforms_list.append(
-#             RandWeightedCropd(keys=['inputs', 'labels'],
-#                           w_key='weight_map',
-#                           spatial_size=spatial_size, num_samples=2))
-        if split == 'train' and not return_aug:
-            # RandAffine when not doing ADA
-            transforms_list.append(RandAffined(
-                    keys=['inputs', 'labels'],
-                    allow_missing_keys=True,
-                    spatial_size=spatial_size,
-                    prob=1.0,
-                    rotate_range=[0, 0, 1.57],
-                    shear_range=0.0,
-                    translate_range=[10, 10, 10],
-                    scale_range=[0.1, 0.1, 0.1],
-            ))
+#             ResizeWithPadOrCropd(keys=['inputs', 'labels'], spatial_size=spatial_size, method="end", mode="constant", constant_values=(0,))
+#         )
+#         transforms_list.append(
+#             CenterSpatialCropd(keys=['inputs', 'labels'],
+#                           roi_size=spatial_size))
         transforms_list.append(
             RandSpatialCropSamplesd(keys=['inputs', 'labels'],
-                          roi_size=spatial_size, num_samples=2, random_size=False))
+                          roi_size=spatial_size, num_samples=1, random_size=False))
+        if isinstance(label_mapping, dict):
+            transforms_list.append(MapLabelValued(keys=['labels'],
+                                                  orig_labels=label_mapping.keys(),
+                                                  target_labels=label_mapping.values()))
+        if bounding_boxes:
+            transforms_list.append(BoundingBoxesd(keys=['labels'], pad_bbox=1)) #2 for EPAD_SWI 
+            #transforms_list.append(AddChanneld(keys=['inputs', 'labels']))
+        if return_aug:
+            transforms_list.append(CopyItemsd(keys=["inputs"], names=["inputs_aug"], times=1))
+            transforms_list.append(RandAffined(
+                keys=["inputs_aug"],
+                allow_missing_keys=True,
+                spatial_size=spatial_size,
+                prob=1.0,
+                rotate_range=0.1,
+                shear_range=0.0,
+                translate_range=(0.1, 0.1, 0.1),
+                scale_range=[-0.1, 0.1],
+            ))
+        transforms_list.append(ToTensord(keys=['inputs', 'labels']))
+    else:
+        files_df = pd.DataFrame(
+            data=[(subj, lp) for subj, lp in zip(subject_ids, flair_paths)],
+            columns=['subject_id', 'flair_path']
+        )
+        images_to_use = dataset_split_df['subject_id'].values
+        files_df = files_df[files_df['subject_id'].isin(images_to_use)]
+        monai_data_list = [{'inputs': row['flair_path']} for _, row in files_df.iterrows()]
+        transforms_list = [
+            LoadImaged(keys=['inputs']),
+            Orientationd(keys=['inputs'], axcodes='RAS'),
+            AddChanneld(keys=['inputs']),
+            Spacingd(keys=['inputs'], pixdim=[1.0, 1.0, 1.0], mode='bilinear'),
+            ScaleIntensityd(keys=['inputs'], minv=0.0, maxv=1.0),
+            ToTensord(keys=['inputs'])
+        ]
 
-    if isinstance(label_mapping, dict):
-        transforms_list.append(MapLabelValued(keys=['labels'],
-                                              orig_labels=label_mapping.keys(),
-                                              target_labels=label_mapping.values()))
-    if bounding_boxes:
-        transforms_list.append(BoundingBoxesd(keys=['labels']))
-        #transforms_list.append(AddChanneld(keys=['inputs', 'labels']))
-    if return_aug:
-        transforms_list.append(CopyItemsd(keys=["inputs"], names=["inputs_aug"], times=1))
-        transforms_list.append(RandAffined(
-            keys=["inputs_aug"],
-            allow_missing_keys=True,
-            spatial_size=spatial_size,
-            prob=1.0,
-            rotate_range=0.1,
-            shear_range=0.0,
-            translate_range=(0.1, 0.1, 0.1),
-            scale_range=[-0.1, 0.1],
-        ))
-    transforms = Compose(transforms_list + [ToTensord(keys=['inputs', 'labels'])])
+    
     # Should normalise at the volume level
-    return MonaiDataset(data=monai_data_list, transform=transforms)
+    return MonaiDataset(data=monai_data_list, transform=Compose(transforms_list))
 
 def infer_on_subject(model, output_path, whole_volume_path, files_df, subject_id, batch_size=10):
     """
@@ -269,3 +283,8 @@ def infer_on_subject(model, output_path, whole_volume_path, files_df, subject_id
         transformed_seg.to_file(str(output_path / submission_filename))
     else:
         'File at {} already exists'.format(str(output_path / submission_filename))
+        
+def reweight_map(weight_map):
+    weight_map[weight_map == 1] = 0.5
+    weight_map[weight_map == 0] = 0.5/weight_map.size
+    return weight_map

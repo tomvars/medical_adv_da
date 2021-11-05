@@ -51,9 +51,32 @@ def get_cc_mask_3d(img: np.array, connectivity: Optional[int] = None) -> np.arra
     """
     return np.expand_dims(cc3d.connected_components(img[0, ...].astype(int)), axis=0)
 
+def pad_bboxes(bboxes, img_shape, pad_size=0):
+    """
+    bboxes is of shape N x 4 (6 for 3D) in medicaldetectiontoolkit format
+    [y1, x1, y2, x2, z1, z2]
+    img_shape is CxHxWxD
+    """
+    
+    if len(bboxes.shape) == 2:
+        if bboxes.shape[1] == 6:
+            bboxes[:, 0] = np.maximum(bboxes[:, 0] - pad_size, 0)
+            bboxes[:, 1] = np.maximum(bboxes[:, 1] - pad_size, 0)
+            bboxes[:, 2] = np.minimum(bboxes[:, 2] + pad_size, img_shape[2])
+            bboxes[:, 3] = np.minimum(bboxes[:, 3] + pad_size, img_shape[1])
+            bboxes[:, 4] = np.maximum(bboxes[:, 4] - pad_size, 0)
+            bboxes[:, 5] = np.minimum(bboxes[:, 5] + pad_size, img_shape[3])
+        elif bboxes.shape[1] == 4:
+            bboxes[:, 0] = np.maximum(bboxes[:, 0] - pad_size, 0)
+            bboxes[:, 1] = np.maximum(bboxes[:, 1] - pad_size, 0)
+            bboxes[:, 2] = np.minimum(bboxes[:, 2] + pad_size, img_shape[2])
+            bboxes[:, 3] = np.minimum(bboxes[:, 3] + pad_size, img_shape[1])
+    return bboxes
+
 def convert_seg_to_bounding_box_coordinates(
     img: np.array,
-    foreground_classes: list = None
+    foreground_classes: list = None,
+    pad_bbox: int = 0
 ) -> Tuple[List[int], List[int]]:
     """
         Args:
@@ -66,7 +89,7 @@ def convert_seg_to_bounding_box_coordinates(
     if foreground_classes is None:
         cc_mask = connected_component_func(img)
         bboxes = [list(generate_spatial_bounding_box(cc_mask, select_fn=lambda x: x==c)) for c in range(1, cc_mask.max()+1)]
-        return convert_bbox_coordinate_format(np.array(bboxes)), [1] * len(bboxes)
+        return pad_bboxes(convert_bbox_coordinate_format(np.array(bboxes)), img.shape, pad_bbox), [1] * len(bboxes)
     else:
         target_output, bboxes = [], []
         for class_idx in foreground_classes:
@@ -76,7 +99,7 @@ def convert_seg_to_bounding_box_coordinates(
                                      for c in range(1, cc_mask.max()+1)]
             bboxes += class_specific_bboxes
             target_output += [class_idx] * len(class_specific_bboxes)
-        return convert_bbox_coordinate_format(np.array(bboxes)), target_output
+        return pad_bboxes(convert_bbox_coordinate_format(np.array(bboxes)), img.shape, pad_bbox), target_output
 
 # def convert_seg_to_bounding_box_coordinates(img: np.ndarray,
 #     select_fn: Callable = is_positive,
@@ -177,16 +200,19 @@ class BoundingBoxes(Transform):
     Args:
         select_fn: function to select expected foreground, default is to select values > 0.
     """
-    def __init__(self, foreground_classes):
+    def __init__(self, foreground_classes, pad_bbox=0):
         super().__init__()
         self.foreground_classes = foreground_classes
+        self.pad_bbox = pad_bbox
         
     def __call__(self, img: np.ndarray) -> np.ndarray:
         """
         See also: :py:class:`monai.transforms.utils.generate_spatial_bounding_box`.
         """
         return convert_seg_to_bounding_box_coordinates(img,
-                                                       foreground_classes=self.foreground_classes)
+                                                       foreground_classes=self.foreground_classes,
+                                                       pad_bbox=self.pad_bbox
+                                                      )
     
     
 ## This would live in monai/transforms/utility/dictionary.py
@@ -209,12 +235,14 @@ class BoundingBoxesd(MapTransform):
         bbox_key_postfix: str = "bbox",
         class_target_postfix: str = "class_target",
         foreground_classes: list = None,
-        allow_missing_keys: bool = False
+        allow_missing_keys: bool = False,
+        pad_bbox: int = 0
     ):
         super().__init__(keys, allow_missing_keys)
-        self.bbox = BoundingBoxes(foreground_classes)
+        self.bbox = BoundingBoxes(foreground_classes, pad_bbox)
         self.bbox_key_postfix = bbox_key_postfix
         self.class_target_postfix = class_target_postfix
+        self.pad_bbox = pad_bbox
 
     def __call__(self, data: Mapping[Hashable, np.ndarray]) -> Dict[Hashable, np.ndarray]:
         """

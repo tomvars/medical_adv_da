@@ -502,7 +502,6 @@ def bbox_overlaps_3D(boxes1, boxes2):
     return overlaps
 
 
-
 def gt_anchor_matching(cf, anchors, gt_boxes, gt_class_ids=None):
     """Given the anchors and GT boxes, compute overlaps and identify positive
     anchors and deltas to refine them to match their corresponding GT boxes.
@@ -561,6 +560,7 @@ def gt_anchor_matching(cf, anchors, gt_boxes, gt_class_ids=None):
     # Tom: We want to include the idea of 'low_quality_matches' here
     # 3. Set anchors with high overlap as positive.
     above_trhesh_ixs = np.argwhere(anchor_iou_max >= anchor_matching_iou)
+    print('Max anchor match!', anchor_iou_max.max())
     if above_trhesh_ixs.size == 0:
         print(f'No matches above {anchor_matching_iou}! Closest is {anchor_iou_max.max()}')
         anchor_class_matches = np.full(anchor_class_matches.shape, fill_value=-1)

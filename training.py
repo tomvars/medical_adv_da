@@ -50,7 +50,7 @@ from src.cycada import CycadaModel
 from src.supervised_retina_unet import SupervisedRetinaUNetModel
 from src.supervised_retina_unet_3d import SupervisedRetinaUNet3DModel
 from src.ada_retina_unet import AdaRetinaUNetModel
-
+from src.ada_retina_unet_3d import AdaRetinaUNet3DModel
 
 
 def train(args, model, starting_iteration,
@@ -62,9 +62,9 @@ def train(args, model, starting_iteration,
                                          shuffle=True, collate_fn=lambda x: x, drop_last=True))
     target_dl = loop_iterable(DataLoader(target_train_dataset, batch_size=args.batch_size,
                                          shuffle=True, collate_fn=lambda x: x, drop_last=True))
-    source_val_slice_dl = loop_iterable(DataLoader(source_val_dataset, batch_size=args.batch_size,
+    source_val_dl = loop_iterable(DataLoader(source_val_dataset, batch_size=args.batch_size,
                                                    shuffle=True, collate_fn=lambda x: x, drop_last=True))
-    target_val_slice_dl = loop_iterable(DataLoader(target_val_dataset, batch_size=args.batch_size,
+    target_val_dl = loop_iterable(DataLoader(target_val_dataset, batch_size=args.batch_size,
                                                    shuffle=True, collate_fn=lambda x: x, drop_last=True))
     epoch = -1
     iteration = starting_iteration
@@ -85,7 +85,9 @@ def train(args, model, starting_iteration,
                     model.iterations = iteration
                     postfix_dict, tensorboard_dict = model.training_loop(source_dl, target_dl)
                     pbar.set_postfix(postfix_dict)
+                    print(iteration)
                     if iteration % args.tensorboard_every_n == 0:
+                        print('Got here?')
                         model.tensorboard_logging(postfix_dict=postfix_dict, tensorboard_dict=tensorboard_dict, split='train')
                     if iteration % args.save_every_n == 0:
                         model.save()
@@ -104,7 +106,7 @@ def train(args, model, starting_iteration,
                 for indb, _ in enumerate(val_mini_batch_indices):
                     pbar.update(1)
                     with torch.no_grad():
-                        postfix_dict, tensorboard_dict = model.validation_loop(source_dl, target_dl)
+                        postfix_dict, val_tensorboard_dict = model.validation_loop(source_val_dl, target_val_dl)
                     if not running_postfix_dict:
                         running_postfix_dict = postfix_dict
                     else:
@@ -112,8 +114,9 @@ def train(args, model, starting_iteration,
                         for key, postfix_value in postfix_dict.items():
                             running_postfix_dict[key] = (postfix_value + indb*running_postfix_dict[key] )/ (indb + 1)
                     pbar.set_postfix(running_postfix_dict)
-            model.tensorboard_logging(postfix_dict=running_postfix_dict,
-                                      tensorboard_dict=tensorboard_dict, split='val')
+            if epoch % args.val_tensorboard_every_n_epochs == 0:
+                model.tensorboard_logging(postfix_dict=running_postfix_dict,
+                                          tensorboard_dict=val_tensorboard_dict, split='val')
             end_time = time.time()
             time_epoch = (end_time - start_time) / 60
             print('Time: {}'.format(time_epoch))
@@ -152,8 +155,6 @@ def infer(args, model, inference_dir):
 def main(args):
     
     band = 'refactor_{}_{}_{}'.format(args.method, args.source, args.target)
-    assert args.data_task in ['ms', 'ms_3d', 'tumour', 'crossmoda',
-                              'crossmoda_3d', 'microbleed', 'microbleed_3d']
     # Directory paths
     models_folder = model_saving_paths[os.uname().nodename]
     results_folder = results_paths[os.uname().nodename]
@@ -169,19 +170,17 @@ def main(args):
                      'icmsc': ICMSCModel, 'cycada': CycadaModel,
                      'supervised_retina_unet': SupervisedRetinaUNetModel,
                      'supervised_retina_unet_3d': SupervisedRetinaUNet3DModel,
-                     'ada_retina_unet': AdaRetinaUNetModel} # If you want to go 3D implement a new model...
-    dataset_factory = {'ms': get_monai_slice_dataset,
-                       'ms_3d': get_monai_patch_dataset,
-                       'crossmoda': get_monai_slice_dataset,
-                       'crossmoda_3d': get_monai_patch_dataset,
-                       'microbleed': get_monai_slice_dataset,
-                       'microbleed_3d': get_monai_patch_dataset}[args.data_task]
+                     'ada_retina_unet': AdaRetinaUNetModel,
+                     'ada_retina_unet_3d': AdaRetinaUNet3DModel
+                    } # If you want to go 3D implement a new model...
+    
+    dataset_factory = {2: get_monai_slice_dataset,
+                       3: get_monai_patch_dataset}[args.dims]
 
     # Customise the data input pipeline based on the current task or model used #
-    label_mapping = {'crossmoda': {0: 0, 1: 1, 2: 0},
-                     'crossmoda_3d': {0: 0, 1: 1, 2: 0},
+    label_mapping = {
+                     'crossmoda': {0: 0, 1: 0, 2: 1},
                      'ms': {0: 0, 1: 1, 2: 1, 3: 1},
-                     'ms_3d': {0: 0, 1: 1, 2: 1, 3: 1},
                     }.get(args.data_task, None)
     bboxes = True if args.task == 'object_detection' else False
     return_aug = True if args.method in ['ada', 'ada_retina_unet', 'ada_3d'] else False # If True, return augmented inputs
@@ -209,11 +208,7 @@ def main(args):
                                          slice_selection_method='mask', dataset_split_csv=args.target_split,
                                          bounding_boxes=bboxes, return_aug=return_aug, label_mapping=label_mapping)
     writer = SummaryWriter(tensorboard_folder+'/{}/{}_{}'.format(args.data_task, band, args.tag))
-    inference_func = {
-        'microbleed': slice_based_inference,
-        'microbleed_3d': patch_based_inference,
-        'crossmoda_3d': patch_based_inference,
-    }[args.data_task]
+    inference_func = {2: slice_based_inference, 3: patch_based_inference}[args.dims]
     model = model_factory[args.method](cf=args, writer=writer,
                                        models_folder=models_folder,
                                        results_folder=results_folder,
@@ -231,7 +226,7 @@ def main(args):
         if args.source_inference_split != "null":
             source_infer_dataset = dataset_factory(data_paths[os.uname().nodename][args.source],
                                              spatial_size=args.spatial_size,
-                                             paddtarget=args.paddtarget, split='infer',
+                                             paddtarget=args.paddtarget, split='val',
                                              slice_selection_method='mask', dataset_split_csv=args.source_inference_split,
                                              bounding_boxes=False, return_aug=False, label_mapping=label_mapping)
         if args.target_inference_split != "null":
@@ -260,6 +255,7 @@ if __name__ == '__main__':
     parser.add_argument('--iterations', type=int, metavar='ITERATIONS', help='number of iterations to train')
     parser.add_argument('--diceThs', type=float, metavar='DICETHS', help='Threshold for dice estimation')
     parser.add_argument('--batch_size', type=int, metavar='BATCHSIZE', help='batch size')
+    parser.add_argument('--dims', type=int, metavar='dim', help='Number of dimensions 2 or 3')
     parser.add_argument('--paddsource', type=int, metavar='PADD', help='PADD')
     parser.add_argument('--paddtarget', type=int, metavar='PADD', help='PADD')
     # parser.add_argument('--SaveTrLoss',  type = int , )
@@ -286,6 +282,7 @@ if __name__ == '__main__':
     parser.add_argument('--target_inference_split', type=str, help='path to dataset_split.csv for inference (split column is ignored)')
     parser.add_argument('--save_every_n', type=int)
     parser.add_argument('--tensorboard_every_n', type=int)
+    parser.add_argument('--val_tensorboard_every_n_epochs', type=int, default=1)
     parser.add_argument('--use_fixmatch', type=int)
     parser.add_argument('--config', type=str, help='path to json file, will override all other config')
     parser.add_argument('--discriminator_complexity', type=float,
@@ -295,7 +292,7 @@ if __name__ == '__main__':
     parser.add_argument('--tumour_only', type=int, help='1 if tumour only labels to be used else 0')
     parser.add_argument('--spatial_size', nargs='+', help='e.g 256 256')
     args = parser.parse_args()
-    config = load_default_config(args.data_task) if args.config is None else json.load(open(args.config, 'r'))
+    config = load_default_config(args.data_task, args.dims) if args.config is None else json.load(open(args.config, 'r'))
     arg_dict = vars(args)
     for key, value in arg_dict.items():
         arg_dict[key] = config[key] if value is None else value

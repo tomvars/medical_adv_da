@@ -358,22 +358,22 @@ def get_3d_retina_unet(spatial_size,
     class Config:
         head_classes: int = 2
         start_filts: int = 48
-        end_filts: int = 48*2  # start_filts * 4
+        end_filts: int = 48*4  # start_filts * 4
         res_architecture: str = 'resnet101'
-        sixth_pooling: bool = False
+        sixth_pooling: bool = True
         n_channels: int = 1
         n_latent_dims: int = 0
         num_seg_classes: int = 2
         norm: str = 'instance_norm'
         relu: str = 'leaky_relu'
-        n_rpn_features: int = 64 # 128 in 3D
+        n_rpn_features: int = 128 # 128 in 3D
         rpn_anchor_ratios: list = field(default_factory=lambda: [0.5, 1, 2])
-        rpn_train_anchors_per_image: int = 6
-        anchor_matching_iou: float = 0.2
+        rpn_train_anchors_per_image: int = 30
+        anchor_matching_iou: float = 0.3
         roi_chunk_size: int = 600
         n_anchors_per_pos: int = 9 #len(cf.rpn_anchor_ratios) * 3
         rpn_anchor_stride: int = 1
-        pre_nms_limit: int = 50000 #3000 if self.dim == 2 else 6000
+        pre_nms_limit: int = 6000 #3000 if self.dim == 2 else 6000
         rpn_bbox_std_dev: np.array = field(default_factory=lambda: np.array([0.1, 0.1, 0.1, 0.2, 0.2, 0.2]))
         bbox_std_dev: np.array = field(default_factory=lambda: np.array([0.1, 0.1, 0.1, 0.2, 0.2, 0.2]))
         dim: int = 3
@@ -381,33 +381,40 @@ def get_3d_retina_unet(spatial_size,
                                                                   spatial_size[0], spatial_size[1],
                                                                   spatial_size[2], spatial_size[2]]))
         window: np.array = field(default_factory=lambda: np.array([0, 0, spatial_size[0],
-                                                                   spatial_size[0], 0,
+                                                                   spatial_size[1], 0,
                                                                    spatial_size[2]]))
-        detection_nms_threshold: float = 1e-5 # Consider changing to 0.1
+        detection_nms_threshold: float = 0.5 # Originally 1e-5 Consider changing to 0.1
         model_max_instances_per_batch_element: int = 30 #10 if self.dim == 2 else 30
-        model_min_confidence: float = 0.1
+        model_min_confidence: float = 0.4
         weight_init: str = None
         patch_size: np.array = field(default_factory=lambda: np.array(spatial_size))
         backbone_path: str = '/home/tom/DomainAdaptationJournal/src/medicaldetectiontoolkit/fpn.py'
         operate_stride1: int = True
-        pyramid_levels: list = field(default_factory=lambda: [0, 1, 2, 3])
+        pyramid_levels: list = field(default_factory=lambda: [0, 1, 2, 3, 4])
         rpn_anchor_scales: dict = field(default_factory=lambda: {'xy': [[base_rpn_anchor_scale_xy],
                                                                         [base_rpn_anchor_scale_xy*2],
                                                                         [base_rpn_anchor_scale_xy*4],
-                                                                        [base_rpn_anchor_scale_xy*8]],
+                                                                        [base_rpn_anchor_scale_xy*8],
+                                                                        [base_rpn_anchor_scale_xy*16]
+                                                                       ],
                                                                  'z': [[base_rpn_anchor_scale_z],
                                                                        [base_rpn_anchor_scale_z*2],
                                                                        [base_rpn_anchor_scale_z*4],
-                                                                       [base_rpn_anchor_scale_z*8]]})
+                                                                       [base_rpn_anchor_scale_z*8],
+                                                                       [base_rpn_anchor_scale_z*16]
+                                                                      ]})
         backbone_strides: dict = field(default_factory=lambda:  {'xy': [base_backbone_strides_xy,
                                                                         base_backbone_strides_xy*2,
                                                                         base_backbone_strides_xy*4,
-                                                                        base_backbone_strides_xy*8],
+                                                                        base_backbone_strides_xy*8,
+                                                                        base_backbone_strides_xy*16,
+                                                                       ],
                                                                  'z': [base_backbone_strides_z,
                                                                        base_backbone_strides_z*2,
                                                                        base_backbone_strides_z*4,
-                                                                       base_backbone_strides_z*8]})
-        rpn_anchor_ratios: list = field(default_factory=lambda: [0.5, 1, 2])
+                                                                       base_backbone_strides_z*8,
+                                                                       base_backbone_strides_z*16,
+                                                                      ]})
     cf = Config()
     cf.backbone_shapes = np.array(
                 [[int(np.ceil(cf.patch_size[0] / stride)),

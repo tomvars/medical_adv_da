@@ -66,6 +66,35 @@ def patch_based_inference(args, model, inference_dir,
                           source_dataset, target_dataset):
     # There needs to be a mapping from args to a transforms list
     datasets = [ds for ds in [source_dataset, target_dataset] if ds is not None]
+    if args.task == 'object_detection':
+        # Trying out training inference.
+        val_org_loader = DataLoader(datasets[0], batch_size=1, num_workers=1)
+        nifti_saver_pred = NiftiSaver(output_dir=inference_dir)
+        nifti_saver_img = NiftiSaver(output_dir=inference_dir, output_postfix='img')
+        nifti_saver_lab = NiftiSaver(output_dir=inference_dir, output_postfix='lab')
+        with torch.no_grad():
+            for val_data in val_org_loader:
+                val_data["pred"] = partial(model.inference_func, mode='box_out')(val_data['inputs'].to(model.device))
+                val_data = [i for i in decollate_batch(val_data)]
+                print(val_data[0]['pred'].sum())
+                nifti_saver_pred.save(val_data[0]['pred'],
+                                 meta_data={
+                                     'filename_or_obj': Path(val_data[0]
+                                                             ['inputs_meta_dict'][
+                                                                 'filename_or_obj']).name})
+                print(val_data[0]['labels'].sum())
+                nifti_saver_lab.save(val_data[0]['labels'],
+                                 meta_data={
+                                     'filename_or_obj': Path(val_data[0]
+                                                             ['inputs_meta_dict'][
+                                                                 'filename_or_obj']).name})
+                nifti_saver_img.save(val_data[0]['inputs'],
+                                 meta_data={
+                                     'filename_or_obj': Path(val_data[0]
+                                                             ['inputs_meta_dict'][
+                                                                 'filename_or_obj']).name})
+        print('finished processing')
+        exit()
 #     if args.task == 'object_detection':
 #         for dataset in datasets:
 #             with torch.no_grad():
@@ -130,11 +159,13 @@ def patch_based_inference(args, model, inference_dir,
                         predictor=partial(model.inference_func, mode='box_out'),
                     )
                     val_data = [i for i in decollate_batch(val_data)]
+                    print(val_data[0]['pred'].sum())
                     nifti_saver_pred.save(val_data[0]['pred'],
                                      meta_data={
                                          'filename_or_obj': Path(val_data[0]
                                                                  ['inputs_meta_dict'][
                                                                      'filename_or_obj']).name})
+                    print(val_data[0]['labels'].sum())
                     nifti_saver_lab.save(val_data[0]['labels'],
                                      meta_data={
                                          'filename_or_obj': Path(val_data[0]

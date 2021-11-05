@@ -114,14 +114,12 @@ def simple_anchor_matching(cf, anchors, gt_boxes, gt_class_ids):
     # matched to them. Skip boxes in crowd areas.
     anchor_iou_argmax = np.argmax(overlaps, axis=1)
     anchor_iou_max = overlaps[np.arange(overlaps.shape[0]), anchor_iou_argmax]
-    return anchor_iou_max.max()
+    return anchor_iou_max.max(), overlaps
 
-
-
-dataset_3d = get_monai_patch_dataset('/data2/tom/microbleeds/VALDO_T2S/', 128, 'mask',
-                        "dataset_split_valdo_t2s.csv", 'train',
+dataset_3d = get_monai_patch_dataset('/data2/tom/microbleeds/EPAD_plus_rCMB_manual/', 128, 'mask',
+                        "dataset_split_epad_rcmb_manual_combined.csv", 'train',
                         spatial_size=[128, 128, 24], spatial_dims=3, exclude_slices=None,
-                        synthesis=True, tumour_only=False, bounding_boxes=True,
+                        synthesis=True, bounding_boxes=True,
                         return_aug=False, label_mapping= {0: 0, 1: 1, 2: 1, 3:1})
 source_dl = loop_iterable(DataLoader(dataset_3d, batch_size=10, shuffle=True, collate_fn=lambda x: x, drop_last=True))
 
@@ -150,16 +148,23 @@ def run_expt(spatial_size=[128, 128, 24],
 
             for b in range(len(gt_boxes)):
                 if gt_boxes[b].size:
-                    anchor_iou_max = simple_anchor_matching(
+                    anchor_iou_max, overlaps = simple_anchor_matching(
                         retina_unet_test.cf, retina_unet_test.np_anchors, gt_boxes[b], gt_class_ids[b])
                     anchor_maxes.append(anchor_iou_max)
+                    print(retina_unet_test.np_anchors[np.argmax(overlaps)])
+                    print(gt_boxes[b])
+                    print(anchor_iou_max)
         anchor_maxes = np.array(anchor_maxes)
+        def volume(coords):
+            return (coords[3] - coords[1]) * (coords[2] - coords[0]) * (coords[5] - coords[4]) 
+        print(np.array([volume(x) for x in  retina_unet_test.np_anchors]).mean())
         return anchor_maxes.mean(), anchor_maxes.std()
 
-print(run_expt(base_rpn_anchor_scale_z=3, base_rpn_anchor_scale_xy=3))
+# print(run_expt(base_rpn_anchor_scale_z=3, base_rpn_anchor_scale_xy=3))
 print(run_expt(base_rpn_anchor_scale_z=2, base_rpn_anchor_scale_xy=2))
-print(run_expt(base_rpn_anchor_scale_xy=1, base_rpn_anchor_scale_z=1))
-#print(run_expt(base_rpn_anchor_scale_xy=4, base_rpn_anchor_scale_z=4))
+# print(run_expt(base_rpn_anchor_scale_z=2, base_rpn_anchor_scale_xy=2))
+# print(run_expt(base_rpn_anchor_scale_xy=1, base_rpn_anchor_scale_z=1))
+# print(run_expt(base_rpn_anchor_scale_xy=4, base_rpn_anchor_scale_z=4))
 
 # print(run_expt(base_rpn_anchor_scale_xy=2))
 # print(run_expt(base_rpn_anchor_scale_xy=1))

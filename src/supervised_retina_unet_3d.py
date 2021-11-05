@@ -16,10 +16,11 @@ from src.utils import save_images
 from src.utils import bland_altman_loss, dice_soft_loss, ss_loss, generate_affine, non_geometric_augmentations, apply_transform
 import src.medicaldetectiontoolkit.model_utils as mutils
 from src.medicaldetectiontoolkit.retina_unet import compute_class_loss, compute_bbox_loss, get_results
+from src.atss_matcher import gt_anchor_matching_atss, compute_giou_loss
 
 anchor_params_dict = {
-    'microbleed_3d': (2, 2, 4, 1),
-    'crossmoda_3d': (4, 4, 4, 1),
+    'microbleed': (2, 2, 4, 1),
+    'crossmoda': (4, 4, 4, 1),
 }
 
 class SupervisedRetinaUNet3DModel(BaseModel):
@@ -43,21 +44,25 @@ class SupervisedRetinaUNet3DModel(BaseModel):
         self.criterion = dice_soft_loss if self.cf.loss == 'dice' else bland_altman_loss
         self.criterion2 = ss_loss
         self.iterations = self.cf.iterations
+        self.anchor_matcher = gt_anchor_matching_atss #mutils.gt_anchor_matching
+        self.bbox_loss = 'l1' # generalised_iou_bbox_loss
     
     def initialise(self):
         self.p = multiprocessing.Pool(10)
         
     def training_loop(self, source_dl, target_dl):
         self.scheduler.step()
+        self.retina_unet.train()
         postfix_dict, tensorboard_dict = {}, {}
         # Data is coming in in un-collated batches, need to collate them here 
         source_batch = next(source_dl)
         source_inputs, source_labels = (np.stack([f[0]['inputs'] for f in source_batch]),
                                         np.stack([f[0]['labels'] for f in source_batch]))
+        print(source_labels.sum())
 
-        target_batch = next(target_dl)
-        target_inputs, target_labels = (torch.tensor(np.stack([f[0]['inputs'] for f in target_batch])).to(self.device),
-                                        torch.tensor(np.stack([f[0]['labels'] for f in target_batch])).to(self.device))
+#         target_batch = next(target_dl)
+#         target_inputs, target_labels = (torch.tensor(np.stack([f[0]['inputs'] for f in target_batch])).to(self.device),
+#                                         torch.tensor(np.stack([f[0]['labels'] for f in target_batch])).to(self.device))
         
         # Training segmentation model from Generated T2s
         img = source_inputs
@@ -82,7 +87,7 @@ class SupervisedRetinaUNet3DModel(BaseModel):
                     box_results_list[b].append({'box_coords': gt_boxes[b][ix],
                                                 'box_label': gt_class_ids[b][ix], 'box_type': 'gt'})
                 # match gt boxes with anchors to generate targets.
-                anchor_class_match, anchor_target_deltas = mutils.gt_anchor_matching(
+                anchor_class_match, anchor_target_deltas = self.anchor_matcher(
                     self.retina_unet.cf, self.retina_unet.np_anchors, gt_boxes[b], gt_class_ids[b])
 
                 # add positive anchors used for loss to results_dict for monitoring.
@@ -101,7 +106,11 @@ class SupervisedRetinaUNet3DModel(BaseModel):
             # compute losses.
             assert anchor_class_match.shape[0] == class_logits[b].shape[0]
             class_loss, neg_anchor_ix = compute_class_loss(anchor_class_match, class_logits[b])
-            bbox_loss = compute_bbox_loss(anchor_target_deltas, pred_deltas[b], anchor_class_match)
+            if self.bbox_loss == 'l1':
+                bbox_loss = compute_bbox_loss(anchor_target_deltas, pred_deltas[b], anchor_class_match)
+            elif self.bbox_loss == 'giou':
+                #Tom: We've lost the connection between anchor and associated gt... only
+                bbox_loss = compute_giou_loss(anchor_target_deltas, pred_deltas[b], anchor_class_match, gt_boxes[b])
 
             # add negative anchors used for loss to results_dict for monitoring.
             neg_anchors = mutils.clip_boxes_numpy(
@@ -120,15 +129,16 @@ class SupervisedRetinaUNet3DModel(BaseModel):
             exit()
         seg_loss_dice = 1 - mutils.batch_dice(F.softmax(seg_logits, dim=1), var_seg_ohe)
         seg_loss_ce = (F.cross_entropy(seg_logits, var_seg[:, 0]))
-        loss = batch_class_loss + batch_bbox_loss + (seg_loss_dice + seg_loss_ce) / 2
-        torch.nn.utils.clip_grad_norm(itertools.chain(self.retina_unet.parameters()), 10.0)
+        loss =  batch_class_loss + batch_bbox_loss + (seg_loss_dice + seg_loss_ce) / 2
+        self.seg_optimizer.zero_grad()
+        torch.nn.utils.clip_grad_norm_(itertools.chain(self.retina_unet.parameters()), 10.0)
         loss.backward()
         self.seg_optimizer.step()
         postfix_dict['torch_loss'] = loss.item()
         postfix_dict['class_loss'] = batch_class_loss.item()
         postfix_dict['bbox_loss'] = batch_bbox_loss.item()
         postfix_dict['seg_loss_dice'] =  seg_loss_dice.item()
-        postfix_dict['seg_loss_ce'] =  seg_loss_ce.item()
+#         postfix_dict['seg_loss_ce'] =  seg_loss_ce.item()
         postfix_dict['mean_seg_preds'] = np.mean(results_dict['seg_preds'])
         tensorboard_dict = {
             'source_inputs': img,
@@ -141,14 +151,15 @@ class SupervisedRetinaUNet3DModel(BaseModel):
     def validation_loop(self, source_dl, target_dl):
         postfix_dict, tensorboard_dict = {}, {}
         with torch.no_grad():
+            self.retina_unet.eval()
             # Data is coming in in un-collated batches, need to collate them here 
             source_batch = next(source_dl)
             source_inputs, source_labels = (np.stack([f[0]['inputs'] for f in source_batch]),
                                             np.stack([f[0]['labels'] for f in source_batch]))
 
-            target_batch = next(target_dl)
-            target_inputs, target_labels = (torch.tensor(np.stack([f[0]['inputs'] for f in target_batch])).to(self.device),
-                                            torch.tensor(np.stack([f[0]['labels'] for f in target_batch])).to(self.device))
+#             target_batch = next(target_dl)
+#             target_inputs, target_labels = (torch.tensor(np.stack([f[0]['inputs'] for f in target_batch])).to(self.device),
+#                                             torch.tensor(np.stack([f[0]['labels'] for f in target_batch])).to(self.device))
 
             # Training segmentation model from Generated T2s
             img = source_inputs
@@ -173,7 +184,7 @@ class SupervisedRetinaUNet3DModel(BaseModel):
                         box_results_list[b].append({'box_coords': gt_boxes[b][ix],
                                                     'box_label': gt_class_ids[b][ix], 'box_type': 'gt'})
                     # match gt boxes with anchors to generate targets.
-                    anchor_class_match, anchor_target_deltas = mutils.gt_anchor_matching(
+                    anchor_class_match, anchor_target_deltas = self.anchor_matcher(
                         self.retina_unet.cf, self.retina_unet.np_anchors, gt_boxes[b], gt_class_ids[b])
 
                     # add positive anchors used for loss to results_dict for monitoring.
@@ -210,7 +221,7 @@ class SupervisedRetinaUNet3DModel(BaseModel):
                 exit()
             seg_loss_dice = 1 - mutils.batch_dice(F.softmax(seg_logits, dim=1), var_seg_ohe)
             seg_loss_ce = (F.cross_entropy(seg_logits, var_seg[:, 0]))
-            loss = batch_class_loss + batch_bbox_loss + (seg_loss_dice + seg_loss_ce) / 2
+            loss = 0.01 * (batch_class_loss + batch_bbox_loss) + (seg_loss_dice + seg_loss_ce) / 2
             postfix_dict['torch_loss'] = loss.item()
             postfix_dict['class_loss'] = batch_class_loss.item()
             postfix_dict['bbox_loss'] = batch_bbox_loss.item()
@@ -225,7 +236,7 @@ class SupervisedRetinaUNet3DModel(BaseModel):
             }
             return postfix_dict, tensorboard_dict
         
-    def inference_func(self, inference_inputs, mode='seg_out', bbox_thresh=0.3):
+    def inference_func(self, inference_inputs, mode='seg_out', bbox_thresh=0.14):
         """
         Expects inputs as torch tensor
         
@@ -233,16 +244,17 @@ class SupervisedRetinaUNet3DModel(BaseModel):
               if 'box_out' outputs a segmentation mask of detections
         """
         with torch.no_grad():
+            self.retina_unet.eval()
             # list of output boxes for monitoring/plotting. each element is a list of boxes per batch element.
             box_results_list = [[] for _ in range(inference_inputs.shape[0])]
             detections, class_logits, pred_deltas, seg_logits, fpn_outs = self.retina_unet(inference_inputs)
             results_dict = get_results(self.retina_unet.cf, inference_inputs.shape,
-                                       detections, seg_logits, box_results_list)
-        output_dict = {
-                'source_inputs': inference_inputs,
-                'source_outputs': F.softmax(seg_logits, dim=1)[:, 1:, ...],
-                'results_dict': results_dict
-            }
+                                       detections, seg_logits)
+            output_dict = {
+                    'source_inputs': inference_inputs,
+                    'source_outputs': F.softmax(seg_logits, dim=1)[:, 1:, ...],
+                    'results_dict': results_dict
+                }
         if mode == 'seg_out':
             return (F.softmax(seg_logits, dim=1)[:, 1:, ...] > 0.5).to(torch.bool)
         elif mode == 'box_out':
@@ -253,10 +265,13 @@ class SupervisedRetinaUNet3DModel(BaseModel):
                 output_mask = torch.zeros_like(inference_inputs[0])
                 for detection_idx, b in enumerate(single_volume_bboxes):
                     if b['box_score'] > bbox_thresh:
+                        print(b['box_type'])
+                        print(b['box_pred_class_id'])
+                        print(b['box_score'])
                         # bbox coords in y1, x1, y2, x2, z1, z2 format
                         bbox_coords = b['box_coords']
                         # Assign each bbox a unique value
-                        output_mask[bbox_coords[1]:bbox_coords[3],
+                        output_mask[:, bbox_coords[1]:bbox_coords[3],
                                     bbox_coords[0]:bbox_coords[2],
                                     bbox_coords[4]:bbox_coords[5]] = detection_idx + 1
                 box_out.append(output_mask)
@@ -276,7 +291,7 @@ class SupervisedRetinaUNet3DModel(BaseModel):
                 save_images(writer=self.writer, images=tensorboard_dict['inputstaug'][:, (idx,), :, :],
                             normalize=True, sigmoid=False,
                             iteration=self.iterations, name=modality + '_aug')
-        elif self.cf.data_task in ['microbleed_3d', 'crossmoda_3d']:
+        elif self.cf.data_task in ['microbleed', 'crossmoda']:
             create_bbox_overlap_volume(writer=self.writer,
                                        images=tensorboard_dict['source_inputs'],
                                        results_dict=tensorboard_dict['results_dict'],

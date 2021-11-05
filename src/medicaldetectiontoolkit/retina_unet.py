@@ -220,7 +220,6 @@ def refine_detections(anchors, probs, deltas, batch_ixs, cf):
     scale = torch.from_numpy(cf.scale).float().cuda()
     refined_rois = mutils.apply_box_deltas_2D(pre_nms_anchors / scale, pre_nms_deltas * std_dev) * scale \
         if cf.dim == 2 else mutils.apply_box_deltas_3D(pre_nms_anchors / scale, pre_nms_deltas * std_dev) * scale
-
     # round and cast to int since we're dealing with pixels now
     refined_rois = mutils.clip_to_window(cf.window, refined_rois)
     pre_nms_rois = torch.round(refined_rois)
@@ -240,9 +239,7 @@ def refine_detections(anchors, probs, deltas, batch_ixs, cf):
             ix_scores, order = ix_scores.sort(descending=True)
             ix_rois = ix_rois[order, :]
             ix_scores = ix_scores
-
             class_keep = nms(ix_rois, ix_scores, cf.detection_nms_threshold)
-
             # map indices back.
             class_keep = keep[bixs[ixs[order[class_keep]]]]
             # merge indices over classes for current batch element
@@ -369,7 +366,9 @@ class net(nn.Module):
         self.Fpn = backbone.FPN(self.cf, conv, operate_stride1=self.cf.operate_stride1).cuda()
         self.Classifier = Classifier(self.cf, conv).cuda()
         self.BBRegressor = BBRegressor(self.cf, conv).cuda()
-        self.final_conv = conv(self.cf.end_filts, self.cf.num_seg_classes, ks=1, pad=0, norm=None, relu=None).cuda()
+#         self.intermediate_conv = conv(self.cf.end_filts, int(self.cf.end_filts/2), ks=1, pad=0,
+#                                      relu=self.cf.relu, norm=self.cf.norm).cuda()
+        self.final_conv = conv(int(self.cf.end_filts), self.cf.num_seg_classes, ks=1, pad=0, norm=None, relu=None).cuda()
 
 
     def train_forward(self, batch, **kwargs):
@@ -484,6 +483,7 @@ class net(nn.Module):
         """
         # Feature extraction
         fpn_outs = self.Fpn(img)
+#         seg_logits = self.final_conv(self.intermediate_conv(fpn_outs[0]))
         seg_logits = self.final_conv(fpn_outs[0])
         selected_fmaps = [fpn_outs[i + 1] for i in self.cf.pyramid_levels]
 

@@ -5,6 +5,7 @@
   "iterations": 15000,
   "diceThs": 0.4,
   "batch_size": 20,
+  "dims": 2,
   "paddsource": 256,
   "paddtarget": 256,
   "affine_rot_degree": 5,
