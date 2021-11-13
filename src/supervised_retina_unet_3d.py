@@ -21,6 +21,7 @@ from src.atss_matcher import gt_anchor_matching_atss, compute_giou_loss
 anchor_params_dict = {
     'microbleed': (2, 2, 4, 1),
     'crossmoda': (4, 4, 4, 1),
+    'ms': (4, 4, 4, 1)
 }
 
 class SupervisedRetinaUNet3DModel(BaseModel):
@@ -39,16 +40,16 @@ class SupervisedRetinaUNet3DModel(BaseModel):
                                               base_backbone_strides_xy=anchor_params_dict[cf.data_task][2],
                                               base_backbone_strides_z=anchor_params_dict[cf.data_task][3])
         self.writer = writer
-        self.seg_optimizer = optim.SGD(self.retina_unet.parameters(), lr=self.cf.lr, weight_decay=0.01, nesterov=True, momentum=0.9)
+        self.seg_optimizer = optim.SGD(self.retina_unet.parameters(), lr=self.cf.lr, weight_decay=1e-5, nesterov=True, momentum=0.9)
         self.scheduler = optim.lr_scheduler.MultiStepLR(self.seg_optimizer, milestones=[20000, 20000], gamma=0.1)
         self.criterion = dice_soft_loss if self.cf.loss == 'dice' else bland_altman_loss
         self.criterion2 = ss_loss
         self.iterations = self.cf.iterations
-        self.anchor_matcher = gt_anchor_matching_atss #mutils.gt_anchor_matching
-        self.bbox_loss = 'l1' # generalised_iou_bbox_loss
+        self.anchor_matcher = mutils.gt_anchor_matching #gt_anchor_matching_atss
+        self.bbox_loss = 'giou' # generalised_iou_bbox_loss
     
     def initialise(self):
-        self.p = multiprocessing.Pool(10)
+        pass
         
     def training_loop(self, source_dl, target_dl):
         self.scheduler.step()
@@ -58,7 +59,6 @@ class SupervisedRetinaUNet3DModel(BaseModel):
         source_batch = next(source_dl)
         source_inputs, source_labels = (np.stack([f[0]['inputs'] for f in source_batch]),
                                         np.stack([f[0]['labels'] for f in source_batch]))
-        print(source_labels.sum())
 
 #         target_batch = next(target_dl)
 #         target_inputs, target_labels = (torch.tensor(np.stack([f[0]['inputs'] for f in target_batch])).to(self.device),
@@ -87,7 +87,7 @@ class SupervisedRetinaUNet3DModel(BaseModel):
                     box_results_list[b].append({'box_coords': gt_boxes[b][ix],
                                                 'box_label': gt_class_ids[b][ix], 'box_type': 'gt'})
                 # match gt boxes with anchors to generate targets.
-                anchor_class_match, anchor_target_deltas = self.anchor_matcher(
+                anchor_class_match, anchor_target_deltas, anchor_class_matches_w_gt_idx = self.anchor_matcher(
                     self.retina_unet.cf, self.retina_unet.np_anchors, gt_boxes[b], gt_class_ids[b])
 
                 # add positive anchors used for loss to results_dict for monitoring.
@@ -99,18 +99,27 @@ class SupervisedRetinaUNet3DModel(BaseModel):
             else:
                 anchor_class_match = np.array([-1]*self.retina_unet.np_anchors.shape[0])
                 anchor_target_deltas = np.array([0])
+                anchor_class_matches_w_gt_idx = np.array([-1]*self.retina_unet.np_anchors.shape[0])
 
             anchor_class_match = torch.from_numpy(anchor_class_match).cuda()
+            anchor_class_matches_w_gt_idx = torch.from_numpy(anchor_class_matches_w_gt_idx).cuda().long()
             anchor_target_deltas = torch.from_numpy(anchor_target_deltas).float().cuda()
 
             # compute losses.
             assert anchor_class_match.shape[0] == class_logits[b].shape[0]
+            pos_indices = torch.nonzero(anchor_class_match > 0)
+            # TODO: Investigate class_logits, is it getting differentiated? check weights of Classifier.
             class_loss, neg_anchor_ix = compute_class_loss(anchor_class_match, class_logits[b])
             if self.bbox_loss == 'l1':
                 bbox_loss = compute_bbox_loss(anchor_target_deltas, pred_deltas[b], anchor_class_match)
             elif self.bbox_loss == 'giou':
                 #Tom: We've lost the connection between anchor and associated gt... only
-                bbox_loss = compute_giou_loss(anchor_target_deltas, pred_deltas[b], anchor_class_match, gt_boxes[b])
+                #anchor_target_deltas, pred_deltas, anchor_class_match, gt_boxes, anchor_class_match_w_idx
+                bbox_loss = compute_giou_loss(pred_deltas=pred_deltas[b],
+                                              anchor_class_match=anchor_class_match,
+                                              gt_boxes=gt_boxes[b],
+                                              anchor_class_match_w_idx=anchor_class_matches_w_gt_idx,
+                                              anchors=self.retina_unet.anchors)
 
             # add negative anchors used for loss to results_dict for monitoring.
             neg_anchors = mutils.clip_boxes_numpy(
@@ -121,7 +130,6 @@ class SupervisedRetinaUNet3DModel(BaseModel):
 
             batch_class_loss += class_loss / img.shape[0]
             batch_bbox_loss += bbox_loss / img.shape[0]
-
         results_dict = get_results(self.retina_unet.cf, img.shape, detections, seg_logits, box_results_list)
         results_dict['box_results_list'] = box_results_list
         if torch.isnan(seg_logits).any():
@@ -130,6 +138,7 @@ class SupervisedRetinaUNet3DModel(BaseModel):
         seg_loss_dice = 1 - mutils.batch_dice(F.softmax(seg_logits, dim=1), var_seg_ohe)
         seg_loss_ce = (F.cross_entropy(seg_logits, var_seg[:, 0]))
         loss =  batch_class_loss + batch_bbox_loss + (seg_loss_dice + seg_loss_ce) / 2
+#         loss =  batch_class_loss
         self.seg_optimizer.zero_grad()
         torch.nn.utils.clip_grad_norm_(itertools.chain(self.retina_unet.parameters()), 10.0)
         loss.backward()
@@ -183,8 +192,8 @@ class SupervisedRetinaUNet3DModel(BaseModel):
                     for ix in range(len(gt_boxes[b])):
                         box_results_list[b].append({'box_coords': gt_boxes[b][ix],
                                                     'box_label': gt_class_ids[b][ix], 'box_type': 'gt'})
-                    # match gt boxes with anchors to generate targets.
-                    anchor_class_match, anchor_target_deltas = self.anchor_matcher(
+                   # match gt boxes with anchors to generate targets.
+                    anchor_class_match, anchor_target_deltas, anchor_class_matches_w_gt_idx = self.anchor_matcher(
                         self.retina_unet.cf, self.retina_unet.np_anchors, gt_boxes[b], gt_class_ids[b])
 
                     # add positive anchors used for loss to results_dict for monitoring.
@@ -196,13 +205,24 @@ class SupervisedRetinaUNet3DModel(BaseModel):
                 else:
                     anchor_class_match = np.array([-1]*self.retina_unet.np_anchors.shape[0])
                     anchor_target_deltas = np.array([0])
+                    anchor_class_matches_w_gt_idx = np.array([-1]*self.retina_unet.np_anchors.shape[0])
 
                 anchor_class_match = torch.from_numpy(anchor_class_match).cuda()
+                anchor_class_matches_w_gt_idx = torch.from_numpy(anchor_class_matches_w_gt_idx).cuda().long()
                 anchor_target_deltas = torch.from_numpy(anchor_target_deltas).float().cuda()
 
                 # compute losses.
                 class_loss, neg_anchor_ix = compute_class_loss(anchor_class_match, class_logits[b])
-                bbox_loss = compute_bbox_loss(anchor_target_deltas, pred_deltas[b], anchor_class_match)
+                if self.bbox_loss == 'l1':
+                    bbox_loss = compute_bbox_loss(anchor_target_deltas, pred_deltas[b], anchor_class_match)
+                elif self.bbox_loss == 'giou':
+                    #Tom: We've lost the connection between anchor and associated gt... only
+                    #anchor_target_deltas, pred_deltas, anchor_class_match, gt_boxes, anchor_class_match_w_idx
+                    bbox_loss = compute_giou_loss(pred_deltas=pred_deltas[b],
+                                                  anchor_class_match=anchor_class_match,
+                                                  gt_boxes=gt_boxes[b],
+                                                  anchor_class_match_w_idx=anchor_class_matches_w_gt_idx,
+                                                  anchors=self.retina_unet.anchors)
 
                 # add negative anchors used for loss to results_dict for monitoring.
                 neg_anchors = mutils.clip_boxes_numpy(
@@ -213,7 +233,7 @@ class SupervisedRetinaUNet3DModel(BaseModel):
 
                 batch_class_loss += class_loss / img.shape[0]
                 batch_bbox_loss += bbox_loss / img.shape[0]
-
+                
             results_dict = get_results(self.retina_unet.cf, img.shape, detections, seg_logits, box_results_list)
             results_dict['box_results_list'] = box_results_list
             if torch.isnan(seg_logits).any():
@@ -310,6 +330,13 @@ class SupervisedRetinaUNet3DModel(BaseModel):
     def load(self, checkpoint_path):
         self.starting_epoch = int(os.path.basename(checkpoint_path.split('.')[0]).split('_')[-1])
         checkpoint = torch.load(checkpoint_path)
+#         pretrained_dict = {k.replace('BBRegressor.', ''): v for k, v in checkpoint['seg_model'].items() if k.startswith('BBRegressor')}
+#         self.retina_unet.BBRegressor.load_state_dict(pretrained_dict)
+#         pretrained_dict = {k.replace('Fpn.', ''): v for k, v in checkpoint['seg_model'].items() if k.startswith('Fpn')}
+#         self.retina_unet.Fpn.load_state_dict(pretrained_dict)
+#         pretrained_dict = {k.replace('final_conv.', ''): v for k, v in checkpoint['seg_model'].items() if k.startswith('final_conv')}
+#         self.retina_unet.final_conv.load_state_dict(pretrained_dict)
+#         print(checkpoint['seg_model'].keys())
         self.retina_unet.load_state_dict(checkpoint['seg_model'])
         self.seg_optimizer.load_state_dict(checkpoint['seg_optimizer'])
     

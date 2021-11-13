@@ -21,7 +21,7 @@ import torch.optim as optim
 
 from monai.losses.dice import DiceLoss
 from monai.data.nifti_saver import NiftiSaver
-from monai.data import DataLoader
+from monai.data import DataLoader, ThreadDataLoader
 
 from inference import patch_based_inference, slice_based_inference
 from src.utils import to_var_gpu
@@ -58,14 +58,24 @@ def train(args, model, starting_iteration,
           target_train_dataset,
           source_val_dataset,
           target_val_dataset):
-    source_dl = loop_iterable(DataLoader(source_train_dataset, batch_size=args.batch_size,
-                                         shuffle=True, collate_fn=lambda x: x, drop_last=True))
-    target_dl = loop_iterable(DataLoader(target_train_dataset, batch_size=args.batch_size,
-                                         shuffle=True, collate_fn=lambda x: x, drop_last=True))
-    source_val_dl = loop_iterable(DataLoader(source_val_dataset, batch_size=args.batch_size,
-                                                   shuffle=True, collate_fn=lambda x: x, drop_last=True))
-    target_val_dl = loop_iterable(DataLoader(target_val_dataset, batch_size=args.batch_size,
-                                                   shuffle=True, collate_fn=lambda x: x, drop_last=True))
+#     source_dl = loop_iterable(DataLoader(source_train_dataset, batch_size=args.batch_size,
+#                                          shuffle=True, collate_fn=lambda x: x, drop_last=True, num_workers=4))
+#     target_dl = loop_iterable(DataLoader(target_train_dataset, batch_size=args.batch_size,
+#                                          shuffle=True, collate_fn=lambda x: x, drop_last=True, num_workers=4))
+#     source_val_dl = loop_iterable(DataLoader(source_val_dataset, batch_size=args.batch_size,
+#                                                    shuffle=True, collate_fn=lambda x: x, drop_last=True, num_workers=4))
+#     target_val_dl = loop_iterable(DataLoader(target_val_dataset, batch_size=args.batch_size,
+#                                                    shuffle=True, collate_fn=lambda x: x, drop_last=True, num_workers=4))
+    source_dl = loop_iterable(ThreadDataLoader(source_train_dataset, batch_size=args.batch_size,
+                                         shuffle=True, collate_fn=lambda x: x, drop_last=True, num_workers=4, buffer_size=40,
+                                              persistent_workers=False, pin_memory=True))
+    target_dl = loop_iterable(ThreadDataLoader(target_train_dataset, batch_size=args.batch_size,
+                                         shuffle=True, collate_fn=lambda x: x, drop_last=True, num_workers=1, buffer_size=14))
+    source_val_dl = loop_iterable(ThreadDataLoader(source_val_dataset, batch_size=args.batch_size,
+                                                   shuffle=True, collate_fn=lambda x: x, drop_last=True, num_workers=1, buffer_size=2,
+                                                  persistent_workers=False, pin_memory=True))
+    target_val_dl = loop_iterable(ThreadDataLoader(target_val_dataset, batch_size=args.batch_size,
+                                                   shuffle=True, collate_fn=lambda x: x, drop_last=True, num_workers=1, buffer_size=2))
     epoch = -1
     iteration = starting_iteration
     is_training = True
@@ -85,7 +95,6 @@ def train(args, model, starting_iteration,
                     model.iterations = iteration
                     postfix_dict, tensorboard_dict = model.training_loop(source_dl, target_dl)
                     pbar.set_postfix(postfix_dict)
-                    print(iteration)
                     if iteration % args.tensorboard_every_n == 0:
                         print('Got here?')
                         model.tensorboard_logging(postfix_dict=postfix_dict, tensorboard_dict=tensorboard_dict, split='train')
@@ -183,7 +192,7 @@ def main(args):
                      'ms': {0: 0, 1: 1, 2: 1, 3: 1},
                     }.get(args.data_task, None)
     bboxes = True if args.task == 'object_detection' else False
-    return_aug = True if args.method in ['ada', 'ada_retina_unet', 'ada_3d'] else False # If True, return augmented inputs
+    return_aug = True if args.method.startswith('ada') else False # If True, return augmented inputs
     #############################################################################
     source_train_dataset = dataset_factory(data_paths[os.uname().nodename][args.source],
                                            exclude_slices = [], #list(range(70,192)) + list(range(20)),

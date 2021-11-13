@@ -368,7 +368,7 @@ def get_3d_retina_unet(spatial_size,
         relu: str = 'leaky_relu'
         n_rpn_features: int = 128 # 128 in 3D
         rpn_anchor_ratios: list = field(default_factory=lambda: [0.5, 1, 2])
-        rpn_train_anchors_per_image: int = 30
+        rpn_train_anchors_per_image: int = 300
         anchor_matching_iou: float = 0.3
         roi_chunk_size: int = 600
         n_anchors_per_pos: int = 9 #len(cf.rpn_anchor_ratios) * 3
@@ -383,7 +383,7 @@ def get_3d_retina_unet(spatial_size,
         window: np.array = field(default_factory=lambda: np.array([0, 0, spatial_size[0],
                                                                    spatial_size[1], 0,
                                                                    spatial_size[2]]))
-        detection_nms_threshold: float = 0.5 # Originally 1e-5 Consider changing to 0.1
+        detection_nms_threshold: float = 1e-5 # Originally 1e-5 Consider changing to 0.1
         model_max_instances_per_batch_element: int = 30 #10 if self.dim == 2 else 30
         model_min_confidence: float = 0.4
         weight_init: str = None

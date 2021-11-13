@@ -312,8 +312,9 @@ def create_bbox_overlap_volume(writer,
     pred_outlines, pred_mask_outlines = [], []
     for batch_ix in range(images.shape[0]):
         main_pred_mask_outline = np.zeros_like(images[0].cpu().numpy()[0])
-        gt_outline = torch.tensor(main_pred_mask_outline).repeat(3, 1, 1, 1)
-        gt_mask_outline = torch.tensor(main_pred_mask_outline).repeat(3, 1, 1, 1)
+        main_gt_mask_outline = np.zeros_like(images[0].cpu().numpy()[0])
+#         gt_mask_outline = torch.tensor(main_pred_mask_outline).repeat(3, 1, 1, 1)
+#         gt_outline = torch.tensor(main_pred_mask_outline).repeat(3, 1, 1, 1)
         gt_bboxes = [box['box_coords'] for box in box_results_list[batch_ix] if box.get('box_type', False) == 'gt']
         pred_bboxes = [(box['box_coords']) for box in boxes[batch_ix] if box.get('box_type', False) == 'det']
         if gt_bboxes and pred_bboxes:
@@ -339,16 +340,20 @@ def create_bbox_overlap_volume(writer,
                     return torch.tensor(output_array), torch.tensor(mask).repeat(3, 1, 1, 1)
                 else:
                     return torch.tensor(output_array), mask
-
-            gt_outline, gt_mask_outline = plot_bbox(gt_bboxes[0])
+#             gt_outline, gt_mask_outline = plot_bbox(gt_bboxes[0])
+            for gt_bbox in gt_bboxes:
+                _, gt_mask_outline = plot_bbox(gt_bbox, return_pytorch_mask=False)
+                main_gt_mask_outline = np.logical_or(main_gt_mask_outline, gt_mask_outline)
             # Need to output a combined mask and a combined coloured mask
             for pred_bbox, iou in zip(pred_bboxes, ious):
                 _, pred_mask_outline = plot_bbox(pred_bbox, cmap='bwr', return_pytorch_mask=False, iou=1)
                 main_pred_mask_outline = np.logical_or(main_pred_mask_outline, pred_mask_outline)
         main_pred_outline = plt.get_cmap('bwr')(main_pred_mask_outline.astype(float))[..., :3]
         main_pred_outline = torch.tensor(np.transpose(main_pred_outline, axes=(3, 0, 1, 2)))
-        gt_outlines.append(gt_outline)
-        gt_mask_outlines.append(gt_mask_outline)
+        main_gt_outline = plt.get_cmap('RdYlGn')(main_gt_mask_outline.astype(float))[..., :3]
+        main_gt_outline = torch.tensor(np.transpose(main_gt_outline, axes=(3, 0, 1, 2)))
+        gt_outlines.append(main_gt_outline)
+        gt_mask_outlines.append(torch.tensor(main_gt_mask_outline).repeat(3, 1, 1, 1))
         pred_outlines.append(main_pred_outline)
         pred_mask_outlines.append(torch.tensor(main_pred_mask_outline).repeat(3, 1, 1, 1))
         

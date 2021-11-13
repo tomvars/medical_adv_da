@@ -49,10 +49,10 @@ class Classifier(nn.Module):
         n_output_channels = cf.n_anchors_per_pos * cf.head_classes
         anchor_stride = cf.rpn_anchor_stride
 
-        self.conv_1 = conv(n_input_channels, n_features, ks=3, stride=anchor_stride, pad=1, relu=cf.relu)
-        self.conv_2 = conv(n_features, n_features, ks=3, stride=anchor_stride, pad=1, relu=cf.relu)
-        self.conv_3 = conv(n_features, n_features, ks=3, stride=anchor_stride, pad=1, relu=cf.relu)
-        self.conv_4 = conv(n_features, n_features, ks=3, stride=anchor_stride, pad=1, relu=cf.relu)
+        self.conv_1 = conv(n_input_channels, n_features, ks=3, stride=anchor_stride, pad=1, relu=cf.relu, norm='group_norm')
+        self.conv_2 = conv(n_features, n_features, ks=3, stride=anchor_stride, pad=1, relu=cf.relu, norm='group_norm')
+        self.conv_3 = conv(n_features, n_features, ks=3, stride=anchor_stride, pad=1, relu=cf.relu, norm='group_norm')
+        self.conv_4 = conv(n_features, n_features, ks=3, stride=anchor_stride, pad=1, relu=cf.relu, norm='group_norm')
         self.conv_final = conv(n_features, n_output_channels, ks=3, stride=anchor_stride, pad=1, relu=None)
 
 
@@ -118,7 +118,7 @@ class BBRegressor(nn.Module):
 #  Loss Functions
 ############################################################
 
-def compute_class_loss(anchor_matches, class_pred_logits, shem_poolsize=20):
+def compute_class_loss(anchor_matches, class_pred_logits, shem_poolsize=200):
     """
     :param anchor_matches: (n_anchors). [-1, 0, class_id] for negative, neutral, and positive matched anchors.
     :param class_pred_logits: (n_anchors, n_classes). logits from classifier sub-network.
@@ -130,7 +130,6 @@ def compute_class_loss(anchor_matches, class_pred_logits, shem_poolsize=20):
     # but neutral anchors (match value = 0) don't.
     pos_indices = torch.nonzero(anchor_matches > 0)
     neg_indices = torch.nonzero(anchor_matches == -1)
-
     # get positive samples and calucalte loss.
     if 0 not in pos_indices.size():
         pos_indices = pos_indices.squeeze(1)
@@ -145,8 +144,8 @@ def compute_class_loss(anchor_matches, class_pred_logits, shem_poolsize=20):
     if 0 not in neg_indices.size():
         neg_indices = neg_indices.squeeze(1)
         roi_logits_neg = class_pred_logits[neg_indices]
-        negative_count = np.max((1, pos_indices.size()[0]))
-        roi_probs_neg = F.softmax(roi_logits_neg, dim=1)
+        negative_count = np.max((1, pos_indices.size()[0]*2))
+        roi_probs_neg = F.softmax(roi_logits_neg, dim=1) 
         neg_ix = mutils.shem(roi_probs_neg, negative_count, shem_poolsize)
         neg_loss = F.cross_entropy(roi_logits_neg[neg_ix], torch.LongTensor([0] * neg_ix.shape[0]).cuda())
         # return the indices of negative samples, which contributed to the loss (for monitoring plots).
@@ -155,6 +154,13 @@ def compute_class_loss(anchor_matches, class_pred_logits, shem_poolsize=20):
         neg_loss = torch.FloatTensor([0]).cuda()
         np_neg_ix = np.array([]).astype('int32')
     loss = (pos_loss + neg_loss) / 2 # + number of positive matches
+#     loss = pos_loss
+#     print(pos_loss)
+#     print(neg_loss)
+#     print(roi_logits_neg[neg_ix])
+#     print(roi_logits_pos)
+#     print(torch.argmax(roi_logits_neg[neg_ix], dim=1))
+#     print(torch.argmax(roi_logits_pos, dim=1))
     return loss, np_neg_ix
 
 
@@ -493,7 +499,6 @@ class net(nn.Module):
             classifier_output = self.Classifier(p)
             class_layer_outputs.append(classifier_output)
             bb_reg_layer_outputs.append(self.BBRegressor(p))
-            
         # Concatenate layer outputs
         # Convert from list of lists of level outputs to list of lists
         # of outputs across levels.

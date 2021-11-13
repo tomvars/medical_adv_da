@@ -520,6 +520,7 @@ def gt_anchor_matching(cf, anchors, gt_boxes, gt_class_ids=None):
     """
 
     anchor_class_matches = np.zeros([anchors.shape[0]], dtype=np.int32)
+    anchor_class_matches_w_gt_idx = np.zeros([anchors.shape[0]], dtype=np.int32)
     anchor_delta_targets = np.zeros((cf.rpn_train_anchors_per_image, 2*cf.dim))
     anchor_matching_iou = cf.anchor_matching_iou
 
@@ -548,8 +549,10 @@ def gt_anchor_matching(cf, anchors, gt_boxes, gt_class_ids=None):
     anchor_iou_max = overlaps[np.arange(overlaps.shape[0]), anchor_iou_argmax]
     if anchors.shape[1] == 4:
         anchor_class_matches[(anchor_iou_max < 0.1)] = -1
+        anchor_class_matches_w_gt_idx[(anchor_iou_max < 0.1)] = -1
     elif anchors.shape[1] == 6:
         anchor_class_matches[(anchor_iou_max < 0.01)] = -1
+        anchor_class_matches_w_gt_idx[(anchor_iou_max < 0.01)] = -1
     else:
         raise ValueError('anchor shape wrong {}'.format(anchors.shape))
 
@@ -559,15 +562,17 @@ def gt_anchor_matching(cf, anchors, gt_boxes, gt_class_ids=None):
         anchor_class_matches[ii] = gt_class_ids[ix]
     # Tom: We want to include the idea of 'low_quality_matches' here
     # 3. Set anchors with high overlap as positive.
-    above_trhesh_ixs = np.argwhere(anchor_iou_max >= anchor_matching_iou)
+    above_thresh_ixs = np.argwhere(anchor_iou_max >= anchor_matching_iou)
     print('Max anchor match!', anchor_iou_max.max())
-    if above_trhesh_ixs.size == 0:
+    if above_thresh_ixs.size == 0:
         print(f'No matches above {anchor_matching_iou}! Closest is {anchor_iou_max.max()}')
         anchor_class_matches = np.full(anchor_class_matches.shape, fill_value=-1)
-        return anchor_class_matches, anchor_delta_targets
+        anchor_class_matches_w_gt_idx = np.full(anchor_class_matches_w_gt_idx.shape, fill_value=-1)
+        return anchor_class_matches, anchor_delta_targets, anchor_class_matches_w_gt_idx
     
     # anchor_class_matches is of size anchors, but gt_class_ids is not...
-    anchor_class_matches[above_trhesh_ixs] = np.array(gt_class_ids)[anchor_iou_argmax[above_trhesh_ixs]]
+    anchor_class_matches[above_thresh_ixs] = np.array(gt_class_ids)[anchor_iou_argmax[above_thresh_ixs]]
+    anchor_class_matches_w_gt_idx[above_thresh_ixs] = anchor_iou_argmax[above_thresh_ixs]
     # Subsample to balance positive anchors.
     ids = np.where(anchor_class_matches > 0)[0]
     # extra == these positive anchors are too many --> reset them to negative ones.
@@ -623,7 +628,7 @@ def gt_anchor_matching(cf, anchors, gt_boxes, gt_class_ids=None):
         anchor_delta_targets[ix] /= cf.rpn_bbox_std_dev
         ix += 1
 
-    return anchor_class_matches, anchor_delta_targets
+    return anchor_class_matches, anchor_delta_targets, anchor_class_matches_w_gt_idx
 
 
 
@@ -880,6 +885,8 @@ class NDConvGenerator(object):
                     norm_layer = nn.InstanceNorm2d(c_out)
                 elif norm == 'batch_norm':
                     norm_layer = nn.BatchNorm2d(c_out)
+                elif norm == 'group_norm':
+                    norm_layer = nn.GroupNorm(4, c_out)
                 else:
                     raise ValueError('norm type as specified in configs is not implemented...')
                 conv = nn.Sequential(conv, norm_layer)
@@ -891,6 +898,8 @@ class NDConvGenerator(object):
                     norm_layer = nn.InstanceNorm3d(c_out)
                 elif norm == 'batch_norm':
                     norm_layer = nn.BatchNorm3d(c_out)
+                elif norm == 'group_norm':
+                    norm_layer = nn.GroupNorm(4, c_out)
                 else:
                     raise ValueError('norm type as specified in configs is not implemented... {}'.format(norm))
                 conv = nn.Sequential(conv, norm_layer)

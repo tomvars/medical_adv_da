@@ -13,23 +13,25 @@ from nndet.core.boxes.sampler import HardNegativeSampler
 import numpy as np
 import torch
 import pdb
+import math
 
 
 atss_matcher = ATSSMatcher(num_candidates=4, center_in_gt=False)
-fg_bg_sampler = HardNegativeSampler(batch_size_per_image=2,
+fg_bg_sampler = HardNegativeSampler(batch_size_per_image=27,
                                     positive_fraction=0.333,
                                     min_neg=2,
                                     pool_size=10)
 
 def convert_coordinates(bboxes):
     """
+    INPLACE OPERATION
     Args: bboxes -> [num_anchors, (y1, x1, y2, x2, (z1), (z2))]
     Returns: bboxes -> [num_anchors, (x1, y1, x2, y2, (z1, z2))]
     """
     if bboxes.shape[1] == 6:
-        bboxes[:, np.array([1, 0, 4, 3, 2, 5])]
+        bboxes = bboxes[:, np.array([1, 0, 3, 2, 4, 5])]
     elif bboxes.shape[1] == 4:
-        bboxes[:, np.array([1, 0, 3, 2])]
+        bboxes = bboxes[:, np.array([1, 0, 3, 2])]
     return torch.tensor(bboxes)
 
 def convert_deltas(deltas, gt_bboxes):
@@ -39,39 +41,46 @@ def convert_deltas(deltas, gt_bboxes):
     
     nnDetection format for deltas is (dx, dy, log(dw), log(dh), dz, log(dd))
     
-    Args: deltas -> [num_anchors, (dy, dx, (dz), log(dh), log(dw), (log(dd)))]
-          gt_bboxes -> [num_gt_bboxes, (y1, x1, y2, x2, (z1), (z2))]
+    Args: deltas: torch.Tensor -> [num_anchors, (dy, dx, (dz), log(dh), log(dw), (log(dd)))]
+          gt_bboxes: torch.Tensor -> [num_gt_bboxes, (y1, x1, y2, x2, (z1), (z2))]
     Returns: pred_bboxes -> [num_anchors, (y1, x1, y2, x2, (z1), (z2))]
     """
-    if bboxes.shape[1] == 6:
-        gt_bboxes = gt_bboxes[:, np.array([1, 0, 4, 3, 2, 5])]
-        deltas = deltas[:, np.array([1, 0, 4, 3, 2, 5])]
+    if deltas.shape[-1] == 6:
         weights = [1.0] * 6
-    elif bboxes.shape[1] == 4:
-        gt_bboxes = gt_bboxes[:, np.array([1, 0, 3, 2])]
-        deltas = deltas[:, np.array([1, 0, 3, 2])]
+        pred_bboxes = decode_single(rel_codes=deltas[:, 0, np.array([1, 0, 4, 3, 2, 5])],
+                                    boxes=gt_bboxes[:, 0, np.array([1, 0, 3, 2, 4, 5])],
+                                    weights=weights,
+                                    bbox_xform_clip=math.log(1000. / 16)) # Got this from torchvision
+    elif deltas.shape[-1] == 4:
         weights = [1.0] * 4
-    pred_bboxes = decode_single(rel_codes=deltas,
-                                boxes=gt_bboxes,
-                                weights=weights,
-                                bbox_xform_clip=math.log(1000. / 16)) # Got this from torchvision
+        pred_bboxes = decode_single(rel_codes=deltas[:, 0, np.array([1, 0, 3, 2])],
+                                    boxes=gt_bboxes[:, 0, np.array([1, 0, 3, 2])],
+                                    weights=weights,
+                                    bbox_xform_clip=math.log(1000. / 16)) # Got this from torchvision
     return pred_bboxes
 
-def compute_giou_loss(anchor_target_deltas, pred_deltas, anchor_class_match, gt_boxes):
+def compute_giou_loss(pred_deltas, anchor_class_match,
+                      gt_boxes, anchor_class_match_w_idx, anchors):
     """
     Computes the generalised IoU loss between predicted boxes and target boxes
     
+    We need predicted bboxes and their anchor matched gt boxes
+    anchor_class_match_w_idx: [N_anchors] array of gt_bbox associated with positive match
     """
-    pos_indices = torch.nonzero(anchor_matches > 0)
-    neg_indices = torch.nonzero(anchor_matches == -1)
+    # TODO: FIX SWITCHING COORDS PROBLEM!
+    pos_indices = torch.nonzero(anchor_class_match > 0)
+    if pos_indices.nelement() == 0:
+        print('No gt bboxes!')
+        return torch.FloatTensor([0]).cuda()
     # Here we do hard negative mining!
-    sampled_pos_inds, sampled_neg_inds = fg_bg_sampler(target_labels, boxes_max_fg_probs)
-    pred_boxes_sampled = convert_deltas(box_deltas[sampled_pos_inds], gt_boxes)
-
-    target_boxes_sampled = torch.cat(matched_gt_boxes, dim=0)[sampled_pos_inds]
-    return torch.diag(generalized_box_iou(pred_boxes,
-                                          target_boxes,
-                                          eps=1e-6), diagonal=0).sum()
+    # boxes_max_fg_probs is the per box prediction
+    pred_boxes_sampled = convert_deltas(pred_deltas[pos_indices],
+                                        anchors[pos_indices])
+    target_boxes_sampled = convert_coordinates(gt_boxes)[
+        anchor_class_match_w_idx[pos_indices]][:, 0, :].cuda()
+    return 1 - torch.diag(generalized_box_iou(pred_boxes_sampled,
+                                          target_boxes_sampled,
+                                          eps=1e-6), diagonal=0).mean()
     
     
 
@@ -100,11 +109,13 @@ def gt_anchor_matching_atss(cf, anchors, gt_boxes, gt_class_ids=None):
     anchor_delta_targets = np.zeros((cf.rpn_train_anchors_per_image, 2*cf.dim))
     # Get num_anchors_per_level
     
-    expected_anchors = [np.prod(cf.backbone_shapes[ii]) * len(cf.rpn_anchor_ratios) * len(cf.rpn_anchor_scales['xy'][ii]) for ii in cf.pyramid_levels]
+    expected_anchors = [np.prod(cf.backbone_shapes[ii]) * len(cf.rpn_anchor_ratios) * len(cf.rpn_anchor_scales['xy'][ii]) for ii in cf.pyramid_levels][::-1]
     match_quality_matrix, anchor_class_matches = atss_matcher.compute_matches(
         boxes=gt_boxes_nndet, anchors=anchors_nndet,
         num_anchors_per_level=expected_anchors,
         num_anchors_per_loc=27)
+    anchor_class_matches_w_gt_idx = anchor_class_matches.detach().clone()
+#     import pdb; pdb.set_trace()
     anchor_class_matches[anchor_class_matches >= 0] = 1
     anchor_iou_argmax = np.argmax(match_quality_matrix.numpy(), axis=0)
     # Leave all negative proposals negative now and sample from them in online hard example mining.
@@ -158,4 +169,4 @@ def gt_anchor_matching_atss(cf, anchors, gt_boxes, gt_class_ids=None):
         # normalize.
         anchor_delta_targets[ix] /= cf.rpn_bbox_std_dev
         ix += 1
-    return anchor_class_matches.numpy(), anchor_delta_targets
+    return anchor_class_matches.numpy(), anchor_delta_targets, anchor_class_matches_w_gt_idx.numpy()

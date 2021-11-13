@@ -8,7 +8,7 @@ from torch.utils.data import Dataset, DataLoader
 from pathlib import Path
 from src.utils import batch_adaptation, to_var_gpu
 from src.custom_monai_transforms import BoundingBoxesd
-from monai.data.dataset import Dataset as MonaiDataset
+from monai.data.dataset import PersistentDataset as MonaiDataset
 from monai.data.nifti_saver import NiftiSaver
 from monai.transforms import (LoadImaged,
                               Lambdad,
@@ -165,7 +165,8 @@ def get_monai_patch_dataset(data_dir, paddtarget, slice_selection_method, datase
 #             transforms_list.append(RandAffined(
 #                     keys=['inputs', 'labels'],
 #                     allow_missing_keys=True,
-#                     spatial_size=spatial_size,
+#                     mode=['bilinear', 'nearest'],
+# #                     spatial_size=spatial_size,
 #                     prob=1.0,
 #                     rotate_range=[0, 0, 1.57],
 #                     shear_range=0.0,
@@ -175,9 +176,8 @@ def get_monai_patch_dataset(data_dir, paddtarget, slice_selection_method, datase
 #         transforms_list.append(
 #             ResizeWithPadOrCropd(keys=['inputs', 'labels'], spatial_size=spatial_size, method="end", mode="constant", constant_values=(0,))
 #         )
-#         transforms_list.append(
-#             CenterSpatialCropd(keys=['inputs', 'labels'],
-#                           roi_size=spatial_size))
+        transforms_list.append(
+            SpatialCropd(keys=['inputs', 'labels'], roi_center=[100, 138, 40], roi_size=[168, 168, 80]))
         transforms_list.append(
             RandSpatialCropSamplesd(keys=['inputs', 'labels'],
                           roi_size=spatial_size, num_samples=1, random_size=False))
@@ -186,7 +186,7 @@ def get_monai_patch_dataset(data_dir, paddtarget, slice_selection_method, datase
                                                   orig_labels=label_mapping.keys(),
                                                   target_labels=label_mapping.values()))
         if bounding_boxes:
-            transforms_list.append(BoundingBoxesd(keys=['labels'], pad_bbox=1)) #2 for EPAD_SWI 
+            transforms_list.append(BoundingBoxesd(keys=['labels'], pad_bbox=0)) #2 for EPAD_SWI 
             #transforms_list.append(AddChanneld(keys=['inputs', 'labels']))
         if return_aug:
             transforms_list.append(CopyItemsd(keys=["inputs"], names=["inputs_aug"], times=1))
@@ -220,7 +220,7 @@ def get_monai_patch_dataset(data_dir, paddtarget, slice_selection_method, datase
 
     
     # Should normalise at the volume level
-    return MonaiDataset(data=monai_data_list, transform=Compose(transforms_list))
+    return MonaiDataset(data=monai_data_list, transform=Compose(transforms_list), cache_dir='/data2/tom/cache_dir')
 
 def infer_on_subject(model, output_path, whole_volume_path, files_df, subject_id, batch_size=10):
     """
