@@ -249,7 +249,7 @@ def load_default_config(task, dims):
         microbleed=json.load(open('config/default_microbleed_config.json', 'r')),
         microbleed_3d=json.load(open('config/default_microbleed_3d_config.json', 'r')),
     )
-    return config_dict[task + '_3d' if dims==3 else '']
+    return config_dict[task + '_3d' if dims==3 else task]
 
 def save_bboxes_for_plotting(writer, img, results_dict, name, iteration):
     """

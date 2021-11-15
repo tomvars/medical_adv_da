@@ -9,7 +9,7 @@ import itertools
 from functools import partial
 from pathlib import Path
 from src.base_model import BaseModel
-from src.networks import get_3d_retina_unet
+from src.networks import get_3d_retina_unet, Discriminator3D_retina
 from src.utils import apply_affine_to_coords
 from src.utils import save_bboxes_for_plotting
 from src.utils import create_bbox_overlap_volume
@@ -50,22 +50,19 @@ class AdaRetinaUNet3DModel(BaseModel):
         self.anchor_matcher = mutils.gt_anchor_matching #gt_anchor_matching_atss
         self.bbox_loss = 'giou' # generalised_iou_bbox_loss
         # Discriminator setup #
-        self.discriminator = Discriminator3D(256, 2, self.cf.discriminator_complexity)
+        self.discriminator = Discriminator3D_retina(1152, 2, self.cf.discriminator_complexity).cuda()
         self.discriminator_optimizer = optim.Adam(self.discriminator.parameters(), lr=1e-4)
-    
+        self.correct = 0
+        self.num_of_subjects = 0
+        ######################
     def initialise(self):
-        self.p = multiprocessing.Pool(10)
-        # Gradient clipping!
-        torch.nn.utils.clip_grad_norm(itertools.chain(self.retina_unet.parameters()), 1.0)
+        pass
     
-    def inner_training_loop(self, batch, inputs, labels):
-        img = inputs
+    def inner_training_loop(self, batch, img: torch.Tensor, labels: np.array):
         gt_class_ids = [f[0]['labels_class_target'] for f in batch]
         gt_boxes = [f[0]['labels_bbox'] for f in batch]
         var_seg_ohe = torch.FloatTensor(mutils.get_one_hot_encoding(labels, self.cf.labels)).cuda()
         var_seg = torch.LongTensor(labels).cuda()
-
-        img = torch.from_numpy(img).float().cuda()
         batch_class_loss = torch.FloatTensor([0]).cuda()
         batch_bbox_loss = torch.FloatTensor([0]).cuda()
 
@@ -153,7 +150,9 @@ class AdaRetinaUNet3DModel(BaseModel):
                                                            np.stack([f[0]['labels'] for f in target_batch]))
         affine_mats = [f[0]['inputs_aug_transforms'][0]['extra_info']['affine'] for f in target_batch]
 
-        
+        source_inputs = torch.from_numpy(source_inputs).float().cuda()
+        target_inputs = torch.from_numpy(target_inputs).float().cuda()
+        target_inputs_aug = torch.from_numpy(target_inputs_aug).float().cuda()
         # This could be a function where we input source_batch, source_labels and output 
         # results_dict, seg_loss_dice, seg_loss_ce, batch_clas_loss, batch_bbox_loss, seg_logits
         (loss, results_dict, seg_loss_dice, seg_loss_ce,
@@ -163,6 +162,42 @@ class AdaRetinaUNet3DModel(BaseModel):
             source_inputs,
             source_labels
         )
+        
+        # Training Discriminator
+        self.retina_unet.eval()
+        self.discriminator.train()
+        inputs_models_discriminator = torch.cat((source_inputs, target_inputs_aug), 0)
+        _, _, _, _, fpn_outs = self.retina_unet(inputs_models_discriminator)
+        dec0, dec1, dec2, dec3, dec4, dec5 = fpn_outs
+        dec0 = F.interpolate(dec0, size=dec1.size()[2:], mode='trilinear')
+        dec1 = F.interpolate(dec1, size=dec1.size()[2:], mode='trilinear')
+        dec2 = F.interpolate(dec2, size=dec1.size()[2:], mode='trilinear')
+        dec3 = F.interpolate(dec3, size=dec1.size()[2:], mode='trilinear')
+        dec4 = F.interpolate(dec4, size=dec1.size()[2:], mode='trilinear')
+        dec5 = F.interpolate(dec5, size=dec1.size()[2:], mode='trilinear')
+        inputs_discriminator = torch.cat((dec0, dec1, dec2, dec3, dec4, dec5), 1)
+
+        self.discriminator.zero_grad()
+        outputs_discriminator = self.discriminator(inputs_discriminator)
+        labels_discriminator = torch.cat((torch.zeros_like(outputs_discriminator)[:source_inputs.size(0), 0, ...],
+                                          torch.ones_like(outputs_discriminator)[:target_inputs_aug.size(0), 0, ...]),
+                                         0).type(torch.LongTensor).to(self.device)
+        loss_discriminator = torch.nn.CrossEntropyLoss(size_average=True)(outputs_discriminator,
+                                                                          labels_discriminator)
+        loss_discriminator.backward()
+        self.discriminator_optimizer.step()
+        self.correct += (torch.argmax(outputs_discriminator, dim=1) == labels_discriminator).float().sum()
+        self.num_of_subjects += int(outputs_discriminator.numel() / 2)
+        
+        # Train seg model
+        self.retina_unet.train()
+        self.discriminator.eval()
+        target_batch = next(target_dl)
+        target_inputs, target_inputs_aug, target_labels = (np.stack([f[0]['inputs'] for f in target_batch]),
+                                                           np.stack([f[0]['inputs_aug'] for f in target_batch]),
+                                                           np.stack([f[0]['labels'] for f in target_batch]))
+        target_inputs = torch.from_numpy(target_inputs).float().cuda()
+        target_inputs_aug = torch.from_numpy(target_inputs_aug).float().cuda()
         with torch.no_grad():
             (loss_t, results_dict_t, seg_loss_dice_t, seg_loss_ce_t,
              batch_class_loss_t, batch_bbox_loss_t, class_logits_t, seg_logits_t,
@@ -179,66 +214,82 @@ class AdaRetinaUNet3DModel(BaseModel):
             target_labels
         )
         
-        
-        if alpha > 0:
-            # Conceptually we are comparing the _t against the _ta.
-            # GT is provided by the predictions on _t
-            # Preds are all from _ta
-            
-            #  detections: (n_final_detections, (y1, x1, y2, x2, (z1), (z2), batch_ix, pred_class_id, pred_score)
-            # You have gt_boxes, now you need to do anchor matching and loss calculation
-            batch_class_loss_ss = torch.FloatTensor([0]).cuda()
-            batch_bbox_loss_ss = torch.FloatTensor([0]).cuda()
-            for b in range(source_inputs.shape[0]):
-                # add gt boxes to results dict for monitoring.
-                pseudo_bbox_preds = [bbox['box_coords'] for bbox in results_dict_t['boxes'][b] if 
-                                         bbox['box_type'] == 'det' and bbox['box_score'] > 0.5]
-                pseudo_class_preds = [bbox['box_pred_class_id'] for bbox in results_dict_t['boxes'][b] if 
-                                      bbox['box_type'] == 'det' and bbox['box_score'] > 0.5]
-                transformed_bbox_preds = np.array([apply_affine_to_coords(p, affine_mats[b].cpu().numpy())
-                                              for p in pseudo_bbox_preds])
-                print('transformed_bbox_preds', transformed_bbox_preds)
-                # Adding these to results_dict_t as a gt
-                #{'box_coords': array([67, 42, 72, 49, 21, 27]), 'box_label': 1, 'box_type': 'gt'}
-                for transformed_bbox_pred in transformed_bbox_preds:
-                    results_dict_t['box_results_list'][b].append({'box_coords': transformed_bbox_pred, 'box_type': 'gt'})
-                if len(transformed_bbox_preds) > 0:
-                    # match gt boxes with anchors to generate targets.
-                    anchor_class_match_t, anchor_target_deltas_t, anchor_class_matches_w_gt_idx_t = self.anchor_matcher(
-                        self.retina_unet.cf, self.retina_unet.np_anchors, transformed_bbox_preds, pseudo_class_preds)
-                else:
-                    anchor_class_match_t = np.array([-1]*self.retina_unet.np_anchors.shape[0])
-                    anchor_target_deltas_t = np.array([0])
-                    anchor_class_matches_w_gt_idx = np.array([-1]*self.retina_unet.np_anchors.shape[0])
+        # Conceptually we are comparing the _t against the _ta.
+        # GT is provided by the predictions on _t
+        # Preds are all from _ta
 
-                anchor_class_match_t = torch.from_numpy(anchor_class_match_t).cuda()
-                anchor_target_deltas_t = torch.from_numpy(anchor_target_deltas_t).float().cuda()
-                anchor_class_matches_w_gt_idx_t = torch.from_numpy(anchor_class_matches_w_gt_idx_t).cuda().long()
-                # compute losses.
-                class_loss_ss, neg_anchor_ix = compute_class_loss(anchor_class_match_t, class_logits_ta[b])
-                if self.bbox_loss == 'l1':
-                    bbox_loss_ss = compute_bbox_loss(anchor_target_deltas_t, pred_deltas_ta[b], anchor_class_match_t)
-                elif self.bbox_loss == 'giou':
-                    #Tom: We've lost the connection between anchor and associated gt... only
-                    #anchor_target_deltas, pred_deltas, anchor_class_match, gt_boxes, anchor_class_match_w_idx
-                    bbox_loss_ss = compute_giou_loss(
-                        pred_deltas=pred_deltas_ta[b],
-                        anchor_class_match=anchor_class_match_t,
-                        gt_boxes=transformed_bbox_preds,
-                        anchor_class_match_w_idx=anchor_class_matches_w_gt_idx_t,
-                        anchors=self.retina_unet.anchors)
-                batch_class_loss_ss += class_loss_ss / source_inputs.shape[0]
-                batch_bbox_loss_ss += bbox_loss_ss / source_inputs.shape[0]
-            loss = loss + alpha * (batch_class_loss_ss + batch_bbox_loss_ss)
-            postfix_dict['class_loss_ss'] = batch_class_loss_ss.item() * alpha
-            postfix_dict['bbox_loss_ss'] = batch_bbox_loss_ss.item() * alpha
+        #  detections: (n_final_detections, (y1, x1, y2, x2, (z1), (z2), batch_ix, pred_class_id, pred_score)
+        # You have gt_boxes, now you need to do anchor matching and loss calculation
+        batch_class_loss_ss = torch.FloatTensor([0]).cuda()
+        batch_bbox_loss_ss = torch.FloatTensor([0]).cuda()
+        for b in range(source_inputs.shape[0]):
+            # add gt boxes to results dict for monitoring.
+            pseudo_bbox_preds = [bbox['box_coords'] for bbox in results_dict_t['boxes'][b] if 
+                                     bbox['box_type'] == 'det' and bbox['box_score'] > 0.5]
+            pseudo_class_preds = [bbox['box_pred_class_id'] for bbox in results_dict_t['boxes'][b] if 
+                                  bbox['box_type'] == 'det' and bbox['box_score'] > 0.5]
+            transformed_bbox_preds = np.array([apply_affine_to_coords(p, affine_mats[b].cpu().numpy())
+                                          for p in pseudo_bbox_preds])
+            # Adding these to results_dict_t as a gt
+            #{'box_coords': array([67, 42, 72, 49, 21, 27]), 'box_label': 1, 'box_type': 'gt'}
+            for transformed_bbox_pred in transformed_bbox_preds:
+                results_dict_t['box_results_list'][b].append({'box_coords': transformed_bbox_pred, 'box_type': 'gt'})
+            if len(transformed_bbox_preds) > 0:
+                # match gt boxes with anchors to generate targets.
+                anchor_class_match_t, anchor_target_deltas_t, anchor_class_matches_w_gt_idx_t = self.anchor_matcher(
+                    self.retina_unet.cf, self.retina_unet.np_anchors, transformed_bbox_preds, pseudo_class_preds)
+            else:
+                anchor_class_match_t = np.array([-1]*self.retina_unet.np_anchors.shape[0])
+                anchor_target_deltas_t = np.array([0])
+                anchor_class_matches_w_gt_idx_t = np.array([-1]*self.retina_unet.np_anchors.shape[0])
+
+            anchor_class_match_t = torch.from_numpy(anchor_class_match_t).cuda()
+            anchor_target_deltas_t = torch.from_numpy(anchor_target_deltas_t).float().cuda()
+            anchor_class_matches_w_gt_idx_t = torch.from_numpy(anchor_class_matches_w_gt_idx_t).cuda().long()
+            # compute losses.
+            class_loss_ss, neg_anchor_ix = compute_class_loss(anchor_class_match_t, class_logits_ta[b])
+            if self.bbox_loss == 'l1':
+                bbox_loss_ss = compute_bbox_loss(anchor_target_deltas_t, pred_deltas_ta[b], anchor_class_match_t)
+            elif self.bbox_loss == 'giou':
+                #Tom: We've lost the connection between anchor and associated gt... only
+                #anchor_target_deltas, pred_deltas, anchor_class_match, gt_boxes, anchor_class_match_w_idx
+                bbox_loss_ss = compute_giou_loss(
+                    pred_deltas=pred_deltas_ta[b],
+                    anchor_class_match=anchor_class_match_t,
+                    gt_boxes=transformed_bbox_preds,
+                    anchor_class_match_w_idx=anchor_class_matches_w_gt_idx_t,
+                    anchors=self.retina_unet.anchors)
+            batch_class_loss_ss += class_loss_ss / source_inputs.shape[0]
+            batch_bbox_loss_ss += bbox_loss_ss / source_inputs.shape[0]
+        pc_loss = alpha * (batch_class_loss_ss + batch_bbox_loss_ss)
+        # Get discriminator loss, but don't update discriminator weights
+        inputs_models_discriminator = torch.cat((source_inputs, target_inputs_aug), 0)
+        _, _, _, _, fpn_outs = self.retina_unet(inputs_models_discriminator)
+        dec0, dec1, dec2, dec3, dec4, dec5 = fpn_outs
+        dec0 = F.interpolate(dec0, size=dec2.size()[2:], mode='trilinear')
+        dec1 = F.interpolate(dec1, size=dec2.size()[2:], mode='trilinear')
+        dec2 = F.interpolate(dec2, size=dec2.size()[2:], mode='trilinear')
+        dec3 = F.interpolate(dec3, size=dec2.size()[2:], mode='trilinear')
+        dec4 = F.interpolate(dec4, size=dec2.size()[2:], mode='trilinear')
+        dec5 = F.interpolate(dec5, size=dec2.size()[2:], mode='trilinear')
+        inputs_discriminator = torch.cat((dec0, dec1, dec2, dec3, dec4, dec5), 1)
+        outputs_discriminator = self.discriminator(inputs_discriminator)
+        labels_discriminator = torch.cat((torch.zeros_like(outputs_discriminator)[:source_inputs.size(0), 0, ...],
+                                          torch.ones_like(outputs_discriminator)[:target_inputs_aug.size(0), 0, ...]),
+                                         0).type(torch.LongTensor).to(self.device)
+        loss_discriminator = torch.nn.CrossEntropyLoss(size_average=True)(outputs_discriminator,
+                                                                          labels_discriminator)
+        adversarial_loss = - beta * loss_discriminator 
+        loss = loss + pc_loss + adversarial_loss
         
+        postfix_dict['class_loss_ss'] = batch_class_loss_ss.item() * alpha
+        postfix_dict['bbox_loss_ss'] = batch_bbox_loss_ss.item() * alpha
+        postfix_dict['adv_loss'] = adversarial_loss.item()
         postfix_dict['torch_loss'] = loss.item()
         postfix_dict['class_loss'] = batch_class_loss.item()
         postfix_dict['bbox_loss'] = batch_bbox_loss.item()
         postfix_dict['seg_loss_dice'] =  seg_loss_dice.item()
-        postfix_dict['seg_loss_ce'] =  seg_loss_ce.item()
-        postfix_dict['mean_seg_preds'] = np.mean(results_dict['seg_preds'])
+        postfix_dict['acc_disc'] = (self.correct/self.num_of_subjects).item()
         tensorboard_dict = {
             'source_inputs': torch.tensor(source_inputs).cuda(),
             'source_labels': torch.tensor(source_labels).cuda(),
@@ -265,8 +316,10 @@ class AdaRetinaUNet3DModel(BaseModel):
         else:
             alpha = self.cf.alpha_lweights
             beta = self.cf.beta_lweights
+        self.scheduler.step()
         postfix_dict, tensorboard_dict = {}, {}
         with torch.no_grad():
+            # Data is coming in in un-collated batches, need to collate them here 
             source_batch = next(source_dl)
             source_inputs, source_labels = (np.stack([f[0]['inputs'] for f in source_batch]),
                                             np.stack([f[0]['labels'] for f in source_batch]))
@@ -276,7 +329,9 @@ class AdaRetinaUNet3DModel(BaseModel):
                                                                np.stack([f[0]['labels'] for f in target_batch]))
             affine_mats = [f[0]['inputs_aug_transforms'][0]['extra_info']['affine'] for f in target_batch]
 
-
+            source_inputs = torch.from_numpy(source_inputs).float().cuda()
+            target_inputs = torch.from_numpy(target_inputs).float().cuda()
+            target_inputs_aug = torch.from_numpy(target_inputs_aug).float().cuda()
             # This could be a function where we input source_batch, source_labels and output 
             # results_dict, seg_loss_dice, seg_loss_ce, batch_clas_loss, batch_bbox_loss, seg_logits
             (loss, results_dict, seg_loss_dice, seg_loss_ce,
@@ -301,74 +356,102 @@ class AdaRetinaUNet3DModel(BaseModel):
                 target_labels
             )
 
-            if alpha > 0:
-                # Conceptually we are comparing the _t against the _ta.
-                # GT is provided by the predictions on _t
-                # Preds are all from _ta
+            # Evaluating Discriminator
+            self.retina_unet.eval()
+            self.discriminator.eval()
+            inputs_models_discriminator = torch.cat((source_inputs, target_inputs_aug), 0)
+            _, _, _, _, fpn_outs = self.retina_unet(inputs_models_discriminator)
+            dec0, dec1, dec2, dec3, dec4, dec5 = fpn_outs
+            dec0 = F.interpolate(dec0, size=dec1.size()[2:], mode='trilinear')
+            dec1 = F.interpolate(dec1, size=dec1.size()[2:], mode='trilinear')
+            dec2 = F.interpolate(dec2, size=dec1.size()[2:], mode='trilinear')
+            dec3 = F.interpolate(dec3, size=dec1.size()[2:], mode='trilinear')
+            dec4 = F.interpolate(dec4, size=dec1.size()[2:], mode='trilinear')
+            dec5 = F.interpolate(dec5, size=dec1.size()[2:], mode='trilinear')
+            inputs_discriminator = torch.cat((dec0, dec1, dec2, dec3, dec4, dec5), 1)
+            outputs_discriminator = self.discriminator(inputs_discriminator)
+            labels_discriminator = torch.cat((torch.zeros_like(outputs_discriminator)[:source_inputs.size(0), 0, ...],
+                                              torch.ones_like(outputs_discriminator)[:target_inputs_aug.size(0), 0, ...]),
+                                             0).type(torch.LongTensor).to(self.device)
+            loss_discriminator = torch.nn.CrossEntropyLoss(size_average=True)(outputs_discriminator,
+                                                                              labels_discriminator)
+            self.correct += (torch.argmax(outputs_discriminator, dim=1) == labels_discriminator).float().sum()
+            self.num_of_subjects += int(outputs_discriminator.numel() / 2)
+            
 
-                #  detections: (n_final_detections, (y1, x1, y2, x2, (z1), (z2), batch_ix, pred_class_id, pred_score)
-                # You have gt_boxes, now you need to do anchor matching and loss calculation
-                batch_class_loss_ss = torch.FloatTensor([0]).cuda()
-                batch_bbox_loss_ss = torch.FloatTensor([0]).cuda()
-                for b in range(source_inputs.shape[0]):
-                    # add gt boxes to results dict for monitoring.
-                    pseudo_bbox_preds = [bbox['box_coords'] for bbox in results_dict_t['boxes'][b] if 
+            # Conceptually we are comparing the _t against the _ta.
+            # GT is provided by the predictions on _t
+            # Preds are all from _ta
+
+            #  detections: (n_final_detections, (y1, x1, y2, x2, (z1), (z2), batch_ix, pred_class_id, pred_score)
+            # You have gt_boxes, now you need to do anchor matching and loss calculation
+            batch_class_loss_ss = torch.FloatTensor([0]).cuda()
+            batch_bbox_loss_ss = torch.FloatTensor([0]).cuda()
+            for b in range(source_inputs.shape[0]):
+                # add gt boxes to results dict for monitoring.
+                pseudo_bbox_preds = [bbox['box_coords'] for bbox in results_dict_t['boxes'][b] if 
                                          bbox['box_type'] == 'det' and bbox['box_score'] > 0.5]
-                    pseudo_class_preds = [bbox['box_pred_class_id'] for bbox in results_dict_t['boxes'][b] if 
-                                          bbox['box_type'] == 'det' and bbox['box_score'] > 0.5]
-                    transformed_bbox_preds = np.array([apply_affine_to_coords(p, affine_mats[b].cpu().numpy())
+                pseudo_class_preds = [bbox['box_pred_class_id'] for bbox in results_dict_t['boxes'][b] if 
+                                      bbox['box_type'] == 'det' and bbox['box_score'] > 0.5]
+                transformed_bbox_preds = np.array([apply_affine_to_coords(p, affine_mats[b].cpu().numpy())
                                               for p in pseudo_bbox_preds])
-                    print('transformed_bbox_preds', transformed_bbox_preds)
-                    if len(transformed_bbox_preds) > 0:
-                        # match gt boxes with anchors to generate targets.
-                        anchor_class_match_t, anchor_target_deltas_t, anchor_class_matches_w_gt_idx_t = self.anchor_matcher(
-                            self.retina_unet.cf, self.retina_unet.np_anchors, transformed_bbox_preds, pseudo_class_preds)
-                    else:
-                        anchor_class_match_t = np.array([-1]*self.retina_unet.np_anchors.shape[0])
-                        anchor_target_deltas_t = np.array([0])
-                        anchor_class_matches_w_gt_idx = np.array([-1]*self.retina_unet.np_anchors.shape[0])
+                # Adding these to results_dict_t as a gt
+                #{'box_coords': array([67, 42, 72, 49, 21, 27]), 'box_label': 1, 'box_type': 'gt'}
+                for transformed_bbox_pred in transformed_bbox_preds:
+                    results_dict_t['box_results_list'][b].append({'box_coords': transformed_bbox_pred, 'box_type': 'gt'})
+                if len(transformed_bbox_preds) > 0:
+                    # match gt boxes with anchors to generate targets.
+                    anchor_class_match_t, anchor_target_deltas_t, anchor_class_matches_w_gt_idx_t = self.anchor_matcher(
+                        self.retina_unet.cf, self.retina_unet.np_anchors, transformed_bbox_preds, pseudo_class_preds)
+                else:
+                    anchor_class_match_t = np.array([-1]*self.retina_unet.np_anchors.shape[0])
+                    anchor_target_deltas_t = np.array([0])
+                    anchor_class_matches_w_gt_idx_t = np.array([-1]*self.retina_unet.np_anchors.shape[0])
 
-                    anchor_class_match_t = torch.from_numpy(anchor_class_match_t).cuda()
-                    anchor_target_deltas_t = torch.from_numpy(anchor_target_deltas_t).float().cuda()
-                    anchor_class_matches_w_gt_idx_t = torch.from_numpy(anchor_class_matches_w_gt_idx_t).cuda().long()
-                    # compute losses.
-                    class_loss_ss, neg_anchor_ix = compute_class_loss(anchor_class_match_t, class_logits_ta[b])
-                    if self.bbox_loss == 'l1':
-                        bbox_loss_ss = compute_bbox_loss(anchor_target_deltas_t, pred_deltas_ta[b], anchor_class_match_t)
-                    elif self.bbox_loss == 'giou':
-                        #Tom: We've lost the connection between anchor and associated gt... only
-                        #anchor_target_deltas, pred_deltas, anchor_class_match, gt_boxes, anchor_class_match_w_idx
-                        bbox_loss_ss = compute_giou_loss(
-                            pred_deltas=pred_deltas_ta[b],
-                            anchor_class_match=anchor_class_match_t,
-                            gt_boxes=transformed_bbox_preds,
-                            anchor_class_match_w_idx=anchor_class_matches_w_gt_idx_t,
-                            anchors=self.retina_unet.anchors)
-                    batch_class_loss_ss += class_loss_ss / source_inputs.shape[0]
-                    batch_bbox_loss_ss += bbox_loss_ss / source_inputs.shape[0]
-                loss = loss + alpha * (batch_class_loss_ss + batch_bbox_loss_ss)
-                postfix_dict['class_loss_ss'] = batch_class_loss_ss.item() * alpha
-                postfix_dict['bbox_loss_ss'] = batch_bbox_loss_ss.item() * alpha
-
-            postfix_dict['torch_loss'] = loss.item()
-            postfix_dict['class_loss'] = batch_class_loss.item()
-            postfix_dict['bbox_loss'] = batch_bbox_loss.item()
-            postfix_dict['seg_loss_dice'] =  seg_loss_dice.item()
-            postfix_dict['seg_loss_ce'] =  seg_loss_ce.item()
-            postfix_dict['mean_seg_preds'] = np.mean(results_dict['seg_preds'])
-            tensorboard_dict = {
-                'source_inputs': torch.tensor(source_inputs).cuda(),
-                'source_labels': torch.tensor(source_labels).cuda(),
-                'target_labels': torch.tensor(target_labels).cuda(),
-                'target_inputs': torch.tensor(target_inputs).cuda(),
-                'target_inputs_aug': torch.tensor(target_inputs_aug).cuda(),
-                'outputs_source': F.softmax(seg_logits, dim=1)[:, 1:, ...],
-                'outputs_target': F.softmax(seg_logits_t, dim=1)[:, 1:, ...],
-                'outputs_target_aug': F.softmax(seg_logits_ta, dim=1)[:, 1:, ...],
-                'results_dict_source': results_dict,
-                'results_dict_t': results_dict_t,
-                'results_dict_ta': results_dict_ta,
-            }
+                anchor_class_match_t = torch.from_numpy(anchor_class_match_t).cuda()
+                anchor_target_deltas_t = torch.from_numpy(anchor_target_deltas_t).float().cuda()
+                anchor_class_matches_w_gt_idx_t = torch.from_numpy(anchor_class_matches_w_gt_idx_t).cuda().long()
+                # compute losses.
+                class_loss_ss, neg_anchor_ix = compute_class_loss(anchor_class_match_t, class_logits_ta[b])
+                if self.bbox_loss == 'l1':
+                    bbox_loss_ss = compute_bbox_loss(anchor_target_deltas_t, pred_deltas_ta[b], anchor_class_match_t)
+                elif self.bbox_loss == 'giou':
+                    #Tom: We've lost the connection between anchor and associated gt... only
+                    #anchor_target_deltas, pred_deltas, anchor_class_match, gt_boxes, anchor_class_match_w_idx
+                    bbox_loss_ss = compute_giou_loss(
+                        pred_deltas=pred_deltas_ta[b],
+                        anchor_class_match=anchor_class_match_t,
+                        gt_boxes=transformed_bbox_preds,
+                        anchor_class_match_w_idx=anchor_class_matches_w_gt_idx_t,
+                        anchors=self.retina_unet.anchors)
+                batch_class_loss_ss += class_loss_ss / source_inputs.shape[0]
+                batch_bbox_loss_ss += bbox_loss_ss / source_inputs.shape[0]
+                
+            pc_loss = alpha * (batch_class_loss_ss + batch_bbox_loss_ss)
+            adversarial_loss = - beta * loss_discriminator 
+            loss = loss + pc_loss + adversarial_loss
+        
+        postfix_dict['class_loss_ss'] = batch_class_loss_ss.item() * alpha
+        postfix_dict['bbox_loss_ss'] = batch_bbox_loss_ss.item() * alpha
+        postfix_dict['adv_loss'] = adversarial_loss.item()
+        postfix_dict['torch_loss'] = loss.item()
+        postfix_dict['class_loss'] = batch_class_loss.item()
+        postfix_dict['bbox_loss'] = batch_bbox_loss.item()
+        postfix_dict['seg_loss_dice'] =  seg_loss_dice.item()
+        postfix_dict['acc_disc'] = (self.correct/self.num_of_subjects).item()
+        tensorboard_dict = {
+            'source_inputs': torch.tensor(source_inputs).cuda(),
+            'source_labels': torch.tensor(source_labels).cuda(),
+            'target_labels': torch.tensor(target_labels).cuda(),
+            'target_inputs': torch.tensor(target_inputs).cuda(),
+            'target_inputs_aug': torch.tensor(target_inputs_aug).cuda(),
+            'outputs_source': F.softmax(seg_logits, dim=1)[:, 1:, ...],
+            'outputs_target': F.softmax(seg_logits_t, dim=1)[:, 1:, ...],
+            'outputs_target_aug': F.softmax(seg_logits_ta, dim=1)[:, 1:, ...],
+            'results_dict_source': results_dict,
+            'results_dict_t': results_dict_t,
+            'results_dict_ta': results_dict_ta,
+        }
         return postfix_dict, tensorboard_dict
     
     def tensorboard_logging(self, postfix_dict, tensorboard_dict, split):
@@ -390,6 +473,12 @@ class AdaRetinaUNet3DModel(BaseModel):
                                        iteration=self.iterations,
                                        name='bbox_plot_target/{}'.format(split),
                                        tensorboard=True, png=False)
+            create_bbox_overlap_volume(writer=self.writer,
+                                       images=tensorboard_dict['target_inputs_aug'],
+                                       results_dict=tensorboard_dict['results_dict_ta'],
+                                       iteration=self.iterations,
+                                       name='bbox_plot_target_aug/{}'.format(split),
+                                       tensorboard=True, png=False)
             create_overlap_image(writer=self.writer,
                                  images=tensorboard_dict['target_inputs'],
                                  preds=tensorboard_dict['outputs_target'],
@@ -402,10 +491,19 @@ class AdaRetinaUNet3DModel(BaseModel):
     def load(self, checkpoint_path):
         self.starting_epoch = int(os.path.basename(checkpoint_path.split('.')[0]).split('_')[-1])
         checkpoint = torch.load(checkpoint_path)
+        print(checkpoint.keys())
         self.retina_unet.load_state_dict(checkpoint['seg_model'])
         self.seg_optimizer.load_state_dict(checkpoint['seg_optimizer'])
+#         self.discriminator.load_state_dict(checkpoint['discriminator'])
+#         self.discriminator_optimizer.load_state_dict(checkpoint['discriminator_optimizer'])
     
     def save(self):
         torch.save({'seg_model': self.retina_unet.state_dict(),
                     'seg_optimizer': self.seg_optimizer.state_dict(),
+                    'discriminator': self.discriminator.state_dict(),
+                    'discriminator_optimizer': self.discriminator_optimizer.state_dict(),
                    }, os.path.join(self.models_folder, self.run_name + '_{}.pt'.format(self.iterations)))
+
+    def epoch_reset(self):
+        self.correct = 0
+        self.num_of_subjects = 0

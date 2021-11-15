@@ -483,4 +483,34 @@ class Discriminator3D(nn.Module):
         x = self.fc1(x)
 
         return x
+    
+class Discriminator3D_retina(nn.Module):
+    """
+    This really expects 128, 128, 64 inputs that have been converted to 32, 32, 64
+    """
+    def __init__(self, num_channels, num_classes, complexity):
+        super(Discriminator3D_retina, self).__init__()
+        self.conv1 = nn.Conv3d(num_channels, int(8 * complexity), kernel_size=3, stride=(1, 1, 2), padding=(1, 1, 1))
+        self.BN1 = nn.InstanceNorm3d(int(8 * complexity))
+        self.conv2 = nn.Conv3d(int(8 * complexity), int(16 * complexity), kernel_size=3, stride=1)
+        self.BN2 = nn.InstanceNorm3d(int(16 * complexity))
+        self.conv3 = nn.Conv3d(int(16 * complexity), int(32 * complexity), kernel_size=3, stride=1)
+        self.BN3 = nn.InstanceNorm3d(int(32 * complexity))
+        self.conv4 = nn.Conv3d(int(32 * complexity), num_classes, kernel_size=1, stride=1)
+#         self.BN4 = nn.InstanceNorm3d(int(64 * complexity))
+#         self.conv5 = nn.Conv3d(int(64 * complexity), 1, kernel_size=(3, 3, 1), stride=2)
+
+    def forward(self, x):
+        x = F.leaky_relu(self.BN1(self.conv1(x)), 0.2)
+        x = F.leaky_relu(self.BN2(self.conv2(x)), 0.2)
+        x = F.leaky_relu(self.BN3(self.conv3(x)), 0.2)
+        x = F.leaky_relu(self.conv4(x), 0.2)
+        
+#         x = F.leaky_relu(self.BN4(self.conv4(x)), 0.2)
+#         x = F.leaky_relu(self.conv5(x), 0.2)
+#         complexity = x.size(1)
+#         x = x.view(-1, int(x.size(2) * x.size(3) * complexity))
+#         x = self.fc1(x)
+
+        return x
      

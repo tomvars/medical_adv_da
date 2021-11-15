@@ -194,26 +194,22 @@ def main(args):
     bboxes = True if args.task == 'object_detection' else False
     return_aug = True if args.method.startswith('ada') else False # If True, return augmented inputs
     #############################################################################
-    source_train_dataset = dataset_factory(data_paths[os.uname().nodename][args.source],
+    source_train_dataset = dataset_factory(data_paths[os.uname().nodename][args.source], cf=args,
                                            exclude_slices = [], #list(range(70,192)) + list(range(20)),
-                                           spatial_size=args.spatial_size,
-                                           paddtarget=args.paddtarget, split='train',
+                                           spatial_size=args.spatial_size, split='train',
                                            slice_selection_method='mask', dataset_split_csv=args.source_split,
                                            bounding_boxes=bboxes, return_aug=False, label_mapping=label_mapping)
-    source_val_dataset = dataset_factory(data_paths[os.uname().nodename][args.source],
-                                         spatial_size=args.spatial_size,
-                                         paddtarget=args.paddtarget, split='val',
+    source_val_dataset = dataset_factory(data_paths[os.uname().nodename][args.source], cf=args,
+                                         spatial_size=args.spatial_size, split='val',
                                          slice_selection_method='mask', dataset_split_csv=args.source_split,
                                          bounding_boxes=bboxes, return_aug=False, label_mapping=label_mapping)
-    target_train_dataset = dataset_factory(data_paths[os.uname().nodename][args.target],
-                                           spatial_size=args.spatial_size,                                                
-                                           paddtarget=args.paddtarget, split='train',
+    target_train_dataset = dataset_factory(data_paths[os.uname().nodename][args.target], cf=args,
+                                           spatial_size=args.spatial_size, split='train',
                                            exclude_slices = [], # list(range(70,192)) + list(range(20)),
                                            slice_selection_method='mask', dataset_split_csv=args.target_split,
                                            bounding_boxes=bboxes, return_aug=return_aug, label_mapping=label_mapping)
-    target_val_dataset = dataset_factory(data_paths[os.uname().nodename][args.target],
-                                         spatial_size=args.spatial_size,
-                                         paddtarget=args.paddtarget, split='val',
+    target_val_dataset = dataset_factory(data_paths[os.uname().nodename][args.target], cf=args,
+                                         spatial_size=args.spatial_size, split='val',
                                          slice_selection_method='mask', dataset_split_csv=args.target_split,
                                          bounding_boxes=bboxes, return_aug=return_aug, label_mapping=label_mapping)
     writer = SummaryWriter(tensorboard_folder+'/{}/{}_{}'.format(args.data_task, band, args.tag))
@@ -299,7 +295,10 @@ if __name__ == '__main__':
     parser.add_argument('--checkpoint', type=str, help='path to checkpoint')
     parser.add_argument('--infer', type=int, help='0 if training else 1')
     parser.add_argument('--tumour_only', type=int, help='1 if tumour only labels to be used else 0')
+    parser.add_argument('--training_aug', type=int, help='1 if training_aug else 0')
     parser.add_argument('--spatial_size', nargs='+', help='e.g 256 256')
+    parser.add_argument('--spatial_crop_center', nargs='+', help='e.g 100, 138, 40')
+    parser.add_argument('--spatial_crop_roi', nargs='+', help='e.g 168, 168, 80')
     args = parser.parse_args()
     config = load_default_config(args.data_task, args.dims) if args.config is None else json.load(open(args.config, 'r'))
     arg_dict = vars(args)

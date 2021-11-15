@@ -109,7 +109,7 @@ def gt_anchor_matching_atss(cf, anchors, gt_boxes, gt_class_ids=None):
     anchor_delta_targets = np.zeros((cf.rpn_train_anchors_per_image, 2*cf.dim))
     # Get num_anchors_per_level
     
-    expected_anchors = [np.prod(cf.backbone_shapes[ii]) * len(cf.rpn_anchor_ratios) * len(cf.rpn_anchor_scales['xy'][ii]) for ii in cf.pyramid_levels][::-1]
+    expected_anchors = [np.prod(cf.backbone_shapes[ii]) * len(cf.rpn_anchor_ratios) * len(cf.rpn_anchor_scales['xy'][ii]) for ii in cf.pyramid_levels]
     match_quality_matrix, anchor_class_matches = atss_matcher.compute_matches(
         boxes=gt_boxes_nndet, anchors=anchors_nndet,
         num_anchors_per_level=expected_anchors,

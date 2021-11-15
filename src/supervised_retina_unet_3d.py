@@ -45,7 +45,7 @@ class SupervisedRetinaUNet3DModel(BaseModel):
         self.criterion = dice_soft_loss if self.cf.loss == 'dice' else bland_altman_loss
         self.criterion2 = ss_loss
         self.iterations = self.cf.iterations
-        self.anchor_matcher = mutils.gt_anchor_matching #gt_anchor_matching_atss
+        self.anchor_matcher = gt_anchor_matching_atss #mutils.gt_anchor_matching #gt_anchor_matching_atss
         self.bbox_loss = 'giou' # generalised_iou_bbox_loss
     
     def initialise(self):
@@ -59,10 +59,7 @@ class SupervisedRetinaUNet3DModel(BaseModel):
         source_batch = next(source_dl)
         source_inputs, source_labels = (np.stack([f[0]['inputs'] for f in source_batch]),
                                         np.stack([f[0]['labels'] for f in source_batch]))
-
-#         target_batch = next(target_dl)
-#         target_inputs, target_labels = (torch.tensor(np.stack([f[0]['inputs'] for f in target_batch])).to(self.device),
-#                                         torch.tensor(np.stack([f[0]['labels'] for f in target_batch])).to(self.device))
+        
         
         # Training segmentation model from Generated T2s
         img = source_inputs
@@ -74,6 +71,7 @@ class SupervisedRetinaUNet3DModel(BaseModel):
         img = torch.from_numpy(img).float().cuda()
         batch_class_loss = torch.FloatTensor([0]).cuda()
         batch_bbox_loss = torch.FloatTensor([0]).cuda()
+        batch_non_zero_elements = torch.FloatTensor([0]).cuda()
 
         # list of output boxes for monitoring/plotting. each element is a list of boxes per batch element.
         box_results_list = [[] for _ in range(img.shape[0])]
@@ -129,7 +127,12 @@ class SupervisedRetinaUNet3DModel(BaseModel):
                 box_results_list[b].append({'box_coords': n, 'box_type': 'neg_anchor'})
 
             batch_class_loss += class_loss / img.shape[0]
-            batch_bbox_loss += bbox_loss / img.shape[0]
+            batch_bbox_loss += bbox_loss
+            if len(gt_boxes[b]) > 0:
+                batch_non_zero_elements += 1
+        if batch_non_zero_elements > 0:
+            batch_bbox_loss /=  batch_non_zero_elements
+    
         results_dict = get_results(self.retina_unet.cf, img.shape, detections, seg_logits, box_results_list)
         results_dict['box_results_list'] = box_results_list
         if torch.isnan(seg_logits).any():
@@ -166,10 +169,6 @@ class SupervisedRetinaUNet3DModel(BaseModel):
             source_inputs, source_labels = (np.stack([f[0]['inputs'] for f in source_batch]),
                                             np.stack([f[0]['labels'] for f in source_batch]))
 
-#             target_batch = next(target_dl)
-#             target_inputs, target_labels = (torch.tensor(np.stack([f[0]['inputs'] for f in target_batch])).to(self.device),
-#                                             torch.tensor(np.stack([f[0]['labels'] for f in target_batch])).to(self.device))
-
             # Training segmentation model from Generated T2s
             img = source_inputs
             gt_class_ids = [f[0]['labels_class_target'] for f in source_batch]
@@ -178,8 +177,11 @@ class SupervisedRetinaUNet3DModel(BaseModel):
             var_seg = torch.LongTensor(source_labels).cuda()
 
             img = torch.from_numpy(img).float().cuda()
+            
+            # For batch_class_loss and batch_class_loss, need to take average over non-zero values.
             batch_class_loss = torch.FloatTensor([0]).cuda()
             batch_bbox_loss = torch.FloatTensor([0]).cuda()
+            batch_non_zero_elements = torch.FloatTensor([0]).cuda()
 
             # list of output boxes for monitoring/plotting. each element is a list of boxes per batch element.
             box_results_list = [[] for _ in range(img.shape[0])]
@@ -230,9 +232,13 @@ class SupervisedRetinaUNet3DModel(BaseModel):
                     img.shape[2:])
                 for n in neg_anchors:
                     box_results_list[b].append({'box_coords': n, 'box_type': 'neg_anchor'})
-
+                
                 batch_class_loss += class_loss / img.shape[0]
-                batch_bbox_loss += bbox_loss / img.shape[0]
+                batch_bbox_loss += bbox_loss
+                if len(gt_boxes[b]) > 0:
+                    batch_non_zero_elements += 1
+            if batch_non_zero_elements > 0:
+                batch_bbox_loss /=  batch_non_zero_elements
                 
             results_dict = get_results(self.retina_unet.cf, img.shape, detections, seg_logits, box_results_list)
             results_dict['box_results_list'] = box_results_list
@@ -241,7 +247,7 @@ class SupervisedRetinaUNet3DModel(BaseModel):
                 exit()
             seg_loss_dice = 1 - mutils.batch_dice(F.softmax(seg_logits, dim=1), var_seg_ohe)
             seg_loss_ce = (F.cross_entropy(seg_logits, var_seg[:, 0]))
-            loss = 0.01 * (batch_class_loss + batch_bbox_loss) + (seg_loss_dice + seg_loss_ce) / 2
+            loss = (batch_class_loss + batch_bbox_loss) + (seg_loss_dice + seg_loss_ce) / 2
             postfix_dict['torch_loss'] = loss.item()
             postfix_dict['class_loss'] = batch_class_loss.item()
             postfix_dict['bbox_loss'] = batch_bbox_loss.item()
