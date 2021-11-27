@@ -45,8 +45,11 @@ class SupervisedRetinaUNet3DModel(BaseModel):
         self.criterion = dice_soft_loss if self.cf.loss == 'dice' else bland_altman_loss
         self.criterion2 = ss_loss
         self.iterations = self.cf.iterations
-        self.anchor_matcher = gt_anchor_matching_atss #mutils.gt_anchor_matching #gt_anchor_matching_atss
-        self.bbox_loss = 'giou' # generalised_iou_bbox_loss
+        if cf.anchor_matching_strategy == "atss":
+            self.anchor_matcher = gt_anchor_matching_atss
+        elif cf.anchor_matching_strategy == "iou":
+            self.anchor_matcher = mutils.gt_anchor_matching
+        self.bbox_loss = cf.bbox_loss
     
     def initialise(self):
         pass
@@ -59,7 +62,6 @@ class SupervisedRetinaUNet3DModel(BaseModel):
         source_batch = next(source_dl)
         source_inputs, source_labels = (np.stack([f[0]['inputs'] for f in source_batch]),
                                         np.stack([f[0]['labels'] for f in source_batch]))
-        
         
         # Training segmentation model from Generated T2s
         img = source_inputs
@@ -77,6 +79,7 @@ class SupervisedRetinaUNet3DModel(BaseModel):
         box_results_list = [[] for _ in range(img.shape[0])]
         detections, class_logits, pred_deltas, seg_logits, fpn_outs = self.retina_unet(img)
         # loop over batch
+        
         for b in range(img.shape[0]):
 
             # add gt boxes to results dict for monitoring.
@@ -165,6 +168,7 @@ class SupervisedRetinaUNet3DModel(BaseModel):
         with torch.no_grad():
             self.retina_unet.eval()
             # Data is coming in in un-collated batches, need to collate them here 
+            
             source_batch = next(source_dl)
             source_inputs, source_labels = (np.stack([f[0]['inputs'] for f in source_batch]),
                                             np.stack([f[0]['labels'] for f in source_batch]))

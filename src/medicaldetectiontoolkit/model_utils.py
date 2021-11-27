@@ -26,6 +26,7 @@ import scipy.interpolate
 import torch
 from torch.autograd import Variable
 import torch.nn as nn
+import torch.nn.functional as F
 
 import tqdm
 ############################################################
@@ -931,6 +932,20 @@ def get_one_hot_encoding(y, n_classes):
         y_ohe = np.zeros((y.shape[0], n_classes, y.shape[2], y.shape[3], y.shape[4])).astype('int32')
     for cl in range(n_classes):
         y_ohe[:, cl][y[:, 0] == cl] = 1
+    return y_ohe
+
+def get_one_hot_encoding_torch(y, n_classes):
+    """
+    transform a numpy label array to a one-hot array of the same shape.
+    :param y: array of shape (b, 1, y, x, (z)).
+    :param n_classes: int, number of classes to unfold in one-hot encoding.
+    :return y_ohe: array of shape (b, n_classes, y, x, (z))
+    """
+    dim = len(y.shape) - 2
+    if dim == 2:
+        y_ohe = F.one_hot(y, n_classes).transpose(1, 4).squeeze(-1)
+    if dim ==3:
+        y_ohe = F.one_hot(y, n_classes).transpose(1, 5).squeeze(-1)
     return y_ohe
 
 

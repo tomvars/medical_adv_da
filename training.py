@@ -68,12 +68,12 @@ def train(args, model, starting_iteration,
 #                                                    shuffle=True, collate_fn=lambda x: x, drop_last=True, num_workers=4))
     source_dl = loop_iterable(ThreadDataLoader(source_train_dataset, batch_size=args.batch_size,
                                          shuffle=True, collate_fn=lambda x: x, drop_last=True, num_workers=4, buffer_size=40,
-                                              persistent_workers=False, pin_memory=True))
+                                              persistent_workers=True, pin_memory=False))
     target_dl = loop_iterable(ThreadDataLoader(target_train_dataset, batch_size=args.batch_size,
                                          shuffle=True, collate_fn=lambda x: x, drop_last=True, num_workers=1, buffer_size=14))
     source_val_dl = loop_iterable(ThreadDataLoader(source_val_dataset, batch_size=args.batch_size,
-                                                   shuffle=True, collate_fn=lambda x: x, drop_last=True, num_workers=1, buffer_size=2,
-                                                  persistent_workers=False, pin_memory=True))
+                                                   shuffle=True, collate_fn=lambda x: x, drop_last=True, num_workers=4, buffer_size=40,
+                                                  persistent_workers=True, pin_memory=False))
     target_val_dl = loop_iterable(ThreadDataLoader(target_val_dataset, batch_size=args.batch_size,
                                                    shuffle=True, collate_fn=lambda x: x, drop_last=True, num_workers=1, buffer_size=2))
     epoch = -1
@@ -190,27 +190,27 @@ def main(args):
     label_mapping = {
                      'crossmoda': {0: 0, 1: 0, 2: 1},
                      'ms': {0: 0, 1: 1, 2: 1, 3: 1},
+                     'microbleed': {0: 0, 1: 1, 2: 1, 3: 1},
                     }.get(args.data_task, None)
     bboxes = True if args.task == 'object_detection' else False
     return_aug = True if args.method.startswith('ada') else False # If True, return augmented inputs
     #############################################################################
     source_train_dataset = dataset_factory(data_paths[os.uname().nodename][args.source], cf=args,
                                            exclude_slices = [], #list(range(70,192)) + list(range(20)),
+                                           spatial_dims=args.dims,
                                            spatial_size=args.spatial_size, split='train',
-                                           slice_selection_method='mask', dataset_split_csv=args.source_split,
+                                           dataset_split_csv=args.source_split,
                                            bounding_boxes=bboxes, return_aug=False, label_mapping=label_mapping)
     source_val_dataset = dataset_factory(data_paths[os.uname().nodename][args.source], cf=args,
-                                         spatial_size=args.spatial_size, split='val',
-                                         slice_selection_method='mask', dataset_split_csv=args.source_split,
+                                         spatial_dims=args.dims,
+                                         spatial_size=args.spatial_size, split='val', dataset_split_csv=args.source_split,
                                          bounding_boxes=bboxes, return_aug=False, label_mapping=label_mapping)
     target_train_dataset = dataset_factory(data_paths[os.uname().nodename][args.target], cf=args,
                                            spatial_size=args.spatial_size, split='train',
-                                           exclude_slices = [], # list(range(70,192)) + list(range(20)),
-                                           slice_selection_method='mask', dataset_split_csv=args.target_split,
+                                           exclude_slices = [], dataset_split_csv=args.target_split,
                                            bounding_boxes=bboxes, return_aug=return_aug, label_mapping=label_mapping)
     target_val_dataset = dataset_factory(data_paths[os.uname().nodename][args.target], cf=args,
-                                         spatial_size=args.spatial_size, split='val',
-                                         slice_selection_method='mask', dataset_split_csv=args.target_split,
+                                         spatial_size=args.spatial_size, split='val', dataset_split_csv=args.target_split,
                                          bounding_boxes=bboxes, return_aug=return_aug, label_mapping=label_mapping)
     writer = SummaryWriter(tensorboard_folder+'/{}/{}_{}'.format(args.data_task, band, args.tag))
     inference_func = {2: slice_based_inference, 3: patch_based_inference}[args.dims]
@@ -275,6 +275,8 @@ if __name__ == '__main__':
     parser.add_argument('--thstesting', type=float, metavar='THSTESTING', help='ths to select testing slices')
     parser.add_argument('--alpha_lweights', type=float, metavar='ALPHA', help='alpha weights the pc loss')
     parser.add_argument('--beta_lweights', type=float, metavar='BETA', help='beta weights the adversarial loss')
+    parser.add_argument('--anchor_matching_strategy', type=str, help='atss or iou (only used in object_detection)')
+    parser.add_argument('--bbox_loss', type=str, help='giou or l1 (only used in object_detection)')
     parser.add_argument('--source', type=str, metavar='Data', help='data name')
     parser.add_argument('--target', type=str, metavar='Data', help='data name')
     parser.add_argument('--method', type=str, metavar='METHODS', help='method name')
@@ -299,6 +301,7 @@ if __name__ == '__main__':
     parser.add_argument('--spatial_size', nargs='+', help='e.g 256 256')
     parser.add_argument('--spatial_crop_center', nargs='+', help='e.g 100, 138, 40')
     parser.add_argument('--spatial_crop_roi', nargs='+', help='e.g 168, 168, 80')
+    parser.add_argument('--sampler', type=str, help='should be either "weighted" or "random"')
     args = parser.parse_args()
     config = load_default_config(args.data_task, args.dims) if args.config is None else json.load(open(args.config, 'r'))
     arg_dict = vars(args)

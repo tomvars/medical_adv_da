@@ -357,16 +357,16 @@ def get_3d_retina_unet(spatial_size,
     @dataclass
     class Config:
         head_classes: int = 2
-        start_filts: int = 48
-        end_filts: int = 48*4  # start_filts * 4
-        res_architecture: str = 'resnet101'
+        start_filts: int = 24
+        end_filts: int = 24*4  # start_filts * 4
+        res_architecture: str = 'resnet50'
         sixth_pooling: bool = True
         n_channels: int = 1
         n_latent_dims: int = 0
         num_seg_classes: int = 2
         norm: str = 'instance_norm'
         relu: str = 'leaky_relu'
-        n_rpn_features: int = 128 # 128 in 3D
+        n_rpn_features: int = 128 # 128 in 3
         rpn_anchor_ratios: list = field(default_factory=lambda: [0.5, 1, 2])
         rpn_train_anchors_per_image: int = 300
         anchor_matching_iou: float = 0.3
@@ -384,7 +384,7 @@ def get_3d_retina_unet(spatial_size,
                                                                    spatial_size[1], 0,
                                                                    spatial_size[2]]))
         detection_nms_threshold: float = 1e-5 # Originally 1e-5 Consider changing to 0.1
-        model_max_instances_per_batch_element: int = 30 #10 if self.dim == 2 else 30
+        model_max_instances_per_batch_element: int = 60 #10 if self.dim == 2 else 30
         model_min_confidence: float = 0.4
         weight_init: str = None
         patch_size: np.array = field(default_factory=lambda: np.array(spatial_size))

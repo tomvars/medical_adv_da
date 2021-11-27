@@ -15,6 +15,13 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 import matplotlib.gridspec as gridspec
 import src.medicaldetectiontoolkit.model_utils as mutils
+import subprocess as sp
+
+def get_gpu_memory():
+    command = "nvidia-smi --query-gpu=memory.free --format=csv"
+    memory_free_info = sp.check_output(command.split()).decode('ascii').split('\n')[:-1][1:]
+    memory_free_values = [int(x.split()[0]) for i, x in enumerate(memory_free_info)]
+    return memory_free_values
 
 def save_images(writer, images, iteration, name, normalize=True, sigmoid=False, k=3,
                     tensorboard=True, png=False):
@@ -44,11 +51,12 @@ def save_images(writer, images, iteration, name, normalize=True, sigmoid=False, 
 def create_overlap_image(writer, images, preds, labels, iteration, name, normalize=True, sigmoid=False, k=3,
                     tensorboard=True, png=False):
     if len(images.shape) == 5:
-        images = (images - images.min()) / (images.max() - images.min())
+        images = ((images - images.min()) / (images.max() - images.min())).cpu()
+        labels = labels.cpu()
         if sigmoid:
-            preds = (torch.sigmoid(preds) > 0.5).to(torch.LongTensor()).to('cuda:0')
+            preds = (torch.sigmoid(preds) > 0.5).to(torch.LongTensor()).cpu()
         else:
-            preds = (preds > 0.5).to(torch.LongTensor()).to('cuda:0')
+            preds = (preds > 0.5).to(torch.LongTensor()).cpu()
         true_positives = preds * labels
         # R G B
         true_positives = torch.hstack([torch.zeros_like(true_positives),

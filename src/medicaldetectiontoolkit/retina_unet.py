@@ -118,7 +118,7 @@ class BBRegressor(nn.Module):
 #  Loss Functions
 ############################################################
 
-def compute_class_loss(anchor_matches, class_pred_logits, shem_poolsize=200):
+def compute_class_loss(anchor_matches, class_pred_logits, shem_poolsize=500):
     """
     :param anchor_matches: (n_anchors). [-1, 0, class_id] for negative, neutral, and positive matched anchors.
     :param class_pred_logits: (n_anchors, n_classes). logits from classifier sub-network.

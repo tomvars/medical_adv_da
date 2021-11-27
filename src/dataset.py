@@ -28,11 +28,16 @@ from monai.transforms import (LoadImaged,
                               CopyItemsd,
                               RandAffined,
                               Spacingd,
+                              RepeatChanneld,
+                              Resized,
                               RandSpatialCropd,
                               RandSpatialCropSamplesd,
                               RandBiasFieldd,
-                              RandAdjustContrastd
+                              RandAdjustContrastd,
+                              RandCropByPosNegLabeld,
+                              SplitChanneld
                              )
+from src.stochastic_weighted_sampler import RandStochaticWeightedCropd
 import ants
 
 
@@ -112,7 +117,7 @@ def get_monai_slice_dataset(data_dir, paddtarget, slice_selection_method, datase
     # Should normalise at the volume level
     return MonaiDataset(data=monai_data_list, transform=transforms)
 
-def get_monai_patch_dataset(data_dir, cf, slice_selection_method, dataset_split_csv, split,
+def get_monai_patch_dataset(data_dir, cf, dataset_split_csv, split,
                             spatial_size=[128, 128, 24], spatial_dims=3, exclude_slices=None,
                             synthesis=True, bounding_boxes=False,
                             return_aug=False, label_mapping=None):
@@ -133,7 +138,6 @@ def get_monai_patch_dataset(data_dir, cf, slice_selection_method, dataset_split_
               ----- wmh_<subject id as int>.nii.gz
     """
     data_dir = os.path.join(data_dir, 'whole')
-    assert slice_selection_method in ['mask', 'none']
     assert 'flair' in os.listdir(data_dir)
     assert 'labels' in os.listdir(data_dir)
     dataset_split_df = pd.read_csv(dataset_split_csv, names=['subject_id', 'split'])
@@ -152,42 +156,78 @@ def get_monai_patch_dataset(data_dir, cf, slice_selection_method, dataset_split_
                             'labels': row['label_path']}
                             for _, row in files_df.iterrows()]
         transforms_list = [
-            LoadImaged(keys=['inputs', 'labels']),
+            LoadImaged(keys=['inputs', 'labels'], reader="NibabelReader", as_closest_canonical=True),
             Orientationd(keys=['inputs', 'labels'], axcodes='RAS'),
             AddChanneld(keys=['inputs', 'labels']),
-            Spacingd(keys=['inputs'], pixdim=[1.0, 1.0, 1.0], mode='bilinear'),
-            Spacingd(keys=['labels'], pixdim=[1.0, 1.0, 1.0], mode='nearest'),
+            Spacingd(keys=['inputs'], pixdim=[1.0, 1.0, 0.75], mode='bilinear'),
+            Spacingd(keys=['labels'], pixdim=[1.0, 1.0, 0.75], mode='nearest'),
             CopyItemsd(keys=['labels'], times=1, names=['weight_map']),
-            CropForegroundd(keys=['inputs', 'labels'], source_key='inputs', margin=(20, 20, 0))
+#             CropForegroundd(keys=['inputs', 'labels'], source_key='inputs', margin=(20, 20, 0)),
         ]
         if split == 'train' and cf.training_aug:
             # RandAffine when not doing ADA
+            transforms_list.append(RandAdjustContrastd(keys=['inputs'],
+                                                       prob=0.5,
+                                                       gamma=(0.5, 1.5)))
             transforms_list.append(RandAffined(
-                    keys=['inputs', 'labels'],
-                    allow_missing_keys=True,
-                    mode=['bilinear', 'nearest'],
-#                     spatial_size=spatial_size,
-                    prob=1.0,
-                    rotate_range=[0, 0, 1.57],
-                    shear_range=0.0,
-                    translate_range=[10, 10, 10],
-                    scale_range=[0.1, 0.1, 0.1],
+                keys=["inputs"],
+                allow_missing_keys=True,
+                #spatial_size=spatial_size,
+                prob=1.0,
+                rotate_range=0.1,
+                shear_range=0.0,
+                translate_range=(0.1, 0.1, 0.1),
+                scale_range=[-0.1, 0.1],
             ))
 #         transforms_list.append(
 #             ResizeWithPadOrCropd(keys=['inputs', 'labels'], spatial_size=spatial_size, method="end", mode="constant", constant_values=(0,))
 #         )
         if isinstance(cf.spatial_crop_center, list) and isinstance(cf.spatial_crop_roi, list):
+            if cf.spatial_crop_center[0] != "null" and cf.spatial_crop_roi[0] != "null":
+                transforms_list.append(
+                    SpatialCropd(keys=['inputs', 'labels'],
+                                 roi_center=cf.spatial_crop_center,
+                                 roi_size=cf.spatial_crop_roi))
+#         transforms_list.append(
+#             RandSpatialCropSamplesd(keys=['inputs', 'labels'],
+#                           roi_size=spatial_size, num_samples=1, random_size=False))
+# RandStochaticWeightedCropd
+        if isinstance(label_mapping, dict):
+                    transforms_list.append(MapLabelValued(keys=['labels'],
+                                                          orig_labels=label_mapping.keys(),
+                                                          target_labels=label_mapping.values()))
+        if cf.sampler == "weighted":
             transforms_list.append(
-                SpatialCropd(keys=['inputs', 'labels'],
-                             roi_center=cf.spatial_crop_center,
-                             roi_size=cf.spatial_crop_roi))
-        transforms_list.append(
+                RandWeightedCropd(keys=['inputs', 'labels'],
+                                  w_key='labels',
+                                  spatial_size=spatial_size,
+                                  num_samples=1)
+            )
+        elif cf.sampler == "random":
+            transforms_list.append(
             RandSpatialCropSamplesd(keys=['inputs', 'labels'],
                           roi_size=spatial_size, num_samples=1, random_size=False))
-        if isinstance(label_mapping, dict):
-            transforms_list.append(MapLabelValued(keys=['labels'],
-                                                  orig_labels=label_mapping.keys(),
-                                                  target_labels=label_mapping.values()))
+        else:
+            raise NotImplemented
+#         transfroms_list.append(
+#             RandCropByPosNegLabeld(keys=[],
+#                                    label_key='labels',
+#                                    spatial_size,
+#                                    pos=1.0, neg=1.0,
+#                                    num_samples=1,)
+#         )
+#         transforms_list.append(
+#             Resized(keys=['inputs', 'labels'],
+#                     spatial_size=spatial_size
+#                    )
+#         )
+#         transforms_list.append(
+#             RepeatChanneld(keys=['inputs', 'labels'], repeats=1)
+#         )
+#         transforms_list.append(
+#             SplitChanneld(keys=['inputs', 'labels'])
+#         )
+        
         if bounding_boxes:
             transforms_list.append(BoundingBoxesd(keys=['labels'], pad_bbox=0)) #2 for EPAD_SWI 
             #transforms_list.append(AddChanneld(keys=['inputs', 'labels']))
@@ -211,6 +251,7 @@ def get_monai_patch_dataset(data_dir, cf, slice_selection_method, dataset_split_
                 scale_range=[-0.1, 0.1],
             ))
             transforms_list.append(ScaleIntensityd(keys=['inputs_aug'], minv=0.0, maxv=1.0))
+            transforms_list.append(ToTensord(keys=['inputs_aug']))
         transforms_list.append(ScaleIntensityd(keys=['inputs'], minv=0.0, maxv=1.0))
         transforms_list.append(ToTensord(keys=['inputs', 'labels']))
     else:
