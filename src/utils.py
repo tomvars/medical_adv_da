@@ -256,6 +256,7 @@ def load_default_config(task, dims):
         crossmoda_3d=json.load(open('config/default_crossmoda_3d_config.json', 'r')),
         microbleed=json.load(open('config/default_microbleed_config.json', 'r')),
         microbleed_3d=json.load(open('config/default_microbleed_3d_config.json', 'r')),
+        tumour_3d=json.load(open('config/default_tumour_3d_config.json', 'r')),
     )
     return config_dict[task + '_3d' if dims==3 else task]
 

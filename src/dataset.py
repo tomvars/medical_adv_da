@@ -16,6 +16,7 @@ from monai.transforms import (LoadImaged,
                               SqueezeDimd,
                               ToTensord,
                               Compose,
+                              EnsureChannelFirstd,
                               AddChanneld,
                               ResizeWithPadOrCropd,
                               ScaleIntensityd,
@@ -33,6 +34,9 @@ from monai.transforms import (LoadImaged,
                               RandSpatialCropd,
                               RandSpatialCropSamplesd,
                               RandBiasFieldd,
+                              RandGibbsNoised,
+                              RandGaussianNoised,
+                              RandGaussianSmoothd,
                               RandAdjustContrastd,
                               RandCropByPosNegLabeld,
                               SplitChanneld
@@ -119,6 +123,7 @@ def get_monai_slice_dataset(data_dir, paddtarget, slice_selection_method, datase
 
 def get_monai_patch_dataset(data_dir, cf, dataset_split_csv, split,
                             spatial_size=[128, 128, 24], spatial_dims=3, exclude_slices=None,
+                            training_aug=False, include_dist_map=False,
                             synthesis=True, bounding_boxes=False,
                             return_aug=False, label_mapping=None):
     """
@@ -159,16 +164,27 @@ def get_monai_patch_dataset(data_dir, cf, dataset_split_csv, split,
             LoadImaged(keys=['inputs', 'labels'], reader="NibabelReader", as_closest_canonical=True),
             Orientationd(keys=['inputs', 'labels'], axcodes='RAS'),
             AddChanneld(keys=['inputs', 'labels']),
-            Spacingd(keys=['inputs'], pixdim=[1.0, 1.0, 0.75], mode='bilinear'),
-            Spacingd(keys=['labels'], pixdim=[1.0, 1.0, 0.75], mode='nearest'),
+            Spacingd(keys=['inputs'], pixdim=[1.0, 1.0, 1.0], mode='bilinear'),
+            Spacingd(keys=['labels'], pixdim=[1.0, 1.0, 1.0], mode='nearest'),
             CopyItemsd(keys=['labels'], times=1, names=['weight_map']),
-#             CropForegroundd(keys=['inputs', 'labels'], source_key='inputs', margin=(20, 20, 0)),
+            CropForegroundd(keys=['inputs', 'labels'], source_key='inputs', margin=(20, 20, 20)),
         ]
-        if split == 'train' and cf.training_aug:
+        if training_aug:
             # RandAffine when not doing ADA
             transforms_list.append(RandAdjustContrastd(keys=['inputs'],
                                                        prob=0.5,
                                                        gamma=(0.5, 1.5)))
+            transforms_list.append(RandGaussianNoised(
+                keys=['inputs'],
+                prob=0.15,
+                mean=0.0,
+                std=0.1))
+            transforms_list.append(RandGibbsNoised(keys=['inputs'],
+                                                   prob=0.25,
+                                                   alpha=(0.0, 1.0),
+                                                   allow_missing_keys=False,
+                                                   as_tensor_output=True))
+            
             transforms_list.append(RandAffined(
                 keys=["inputs"],
                 allow_missing_keys=True,
@@ -178,6 +194,13 @@ def get_monai_patch_dataset(data_dir, cf, dataset_split_csv, split,
                 shear_range=0.0,
                 translate_range=(0.1, 0.1, 0.1),
                 scale_range=[-0.1, 0.1],
+            ))
+            transforms_list.append(RandGaussianSmoothd(
+                keys=['inputs'],
+                prob=0.15,
+                sigma_x=[0.5, 1.5],
+                sigma_y=[0.5, 1.5],
+                sigma_z=[0.5, 1.5]
             ))
 #         transforms_list.append(
 #             ResizeWithPadOrCropd(keys=['inputs', 'labels'], spatial_size=spatial_size, method="end", mode="constant", constant_values=(0,))
@@ -198,10 +221,11 @@ def get_monai_patch_dataset(data_dir, cf, dataset_split_csv, split,
                                                           target_labels=label_mapping.values()))
         if cf.sampler == "weighted":
             transforms_list.append(
-                RandWeightedCropd(keys=['inputs', 'labels'],
-                                  w_key='labels',
-                                  spatial_size=spatial_size,
-                                  num_samples=1)
+                RandStochaticWeightedCropd(keys=['inputs', 'labels'],
+                                           w_key='labels',
+                                           spatial_size=spatial_size,
+                                           prob=0.5,
+                                           num_samples=1)
             )
         elif cf.sampler == "random":
             transforms_list.append(
@@ -227,19 +251,30 @@ def get_monai_patch_dataset(data_dir, cf, dataset_split_csv, split,
 #         transforms_list.append(
 #             SplitChanneld(keys=['inputs', 'labels'])
 #         )
-        
         if bounding_boxes:
             transforms_list.append(BoundingBoxesd(keys=['labels'], pad_bbox=0)) #2 for EPAD_SWI 
             #transforms_list.append(AddChanneld(keys=['inputs', 'labels']))
+        if include_dist_map:
+            transforms_list.append(BoundingBoxesd(keys=['labels'], pad_bbox=0))
         if return_aug:
             transforms_list.append(CopyItemsd(keys=["inputs"], names=["inputs_aug"], times=1))
-            transforms_list.append(RandBiasFieldd(keys=['inputs_aug'],
-                                                  degree=3,
-                                                  coeff_range=(0.0, 0.1),
-                                                  prob=0.5))
+#             transforms_list.append(RandBiasFieldd(keys=['inputs_aug'],
+#                                                   degree=3,
+#                                                   coeff_range=(0.0, 0.1),
+#                                                   prob=0.5))
             transforms_list.append(RandAdjustContrastd(keys=['inputs_aug'],
                                                        prob=0.5,
                                                        gamma=(0.5, 1.5)))
+            transforms_list.append(RandGaussianNoised(
+                keys=['inputs_aug'],
+                prob=0.15,
+                mean=0.0,
+                std=0.1))
+            transforms_list.append(RandGibbsNoised(keys=['inputs_aug'],
+                                                   prob=0.25,
+                                                   alpha=(0.0, 1.0),
+                                                   allow_missing_keys=False,
+                                                   as_tensor_output=True))
             transforms_list.append(RandAffined(
                 keys=["inputs_aug"],
                 allow_missing_keys=True,
@@ -249,6 +284,14 @@ def get_monai_patch_dataset(data_dir, cf, dataset_split_csv, split,
                 shear_range=0.0,
                 translate_range=(0.1, 0.1, 0.1),
                 scale_range=[-0.1, 0.1],
+                padding_mode="zeros"
+            ))
+            transforms_list.append(RandGaussianSmoothd(
+                keys=['inputs_aug'],
+                prob=0.15,
+                sigma_x=[0.5, 1.5],
+                sigma_y=[0.5, 1.5],
+                sigma_z=[0.5, 1.5]
             ))
             transforms_list.append(ScaleIntensityd(keys=['inputs_aug'], minv=0.0, maxv=1.0))
             transforms_list.append(ToTensord(keys=['inputs_aug']))
@@ -259,14 +302,17 @@ def get_monai_patch_dataset(data_dir, cf, dataset_split_csv, split,
             data=[(subj, lp) for subj, lp in zip(subject_ids, flair_paths)],
             columns=['subject_id', 'flair_path']
         )
-        images_to_use = dataset_split_df['subject_id'].values
+        #images_to_use = dataset_split_df['subject_id'].values
+        images_to_use = dataset_split_df[dataset_split_df['split'] == 'infer']['subject_id'].values
         files_df = files_df[files_df['subject_id'].isin(images_to_use)]
         monai_data_list = [{'inputs': row['flair_path']} for _, row in files_df.iterrows()]
         transforms_list = [
             LoadImaged(keys=['inputs']),
+            EnsureChannelFirstd(keys=["inputs"]),
+            Spacingd(keys=['inputs'], pixdim=[1.0, 1.0, 0.75], mode='bilinear'),
             Orientationd(keys=['inputs'], axcodes='RAS'),
-            AddChanneld(keys=['inputs']),
-            Spacingd(keys=['inputs'], pixdim=[1.0, 1.0, 1.0], mode='bilinear'),
+            #AddChanneld(keys=['inputs']),
+            #CropForegroundd(keys=['inputs'], source_key='inputs', margin=(20, 20, 20)),
             ScaleIntensityd(keys=['inputs'], minv=0.0, maxv=1.0),
             ToTensord(keys=['inputs'])
         ]

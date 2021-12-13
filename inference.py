@@ -77,6 +77,7 @@ def patch_based_inference(args, model, inference_dir,
                 val_data["pred"] = partial(model.inference_func, mode='box_out')(val_data['inputs'].to(model.device))
                 val_data = [i for i in decollate_batch(val_data)]
                 print(val_data[0]['pred'].sum())
+                print(val_data[0]['pred'].shape)
                 nifti_saver_pred.save(val_data[0]['pred'],
                                  meta_data={
                                      'filename_or_obj': Path(val_data[0]
@@ -95,6 +96,50 @@ def patch_based_inference(args, model, inference_dir,
                                                                  'filename_or_obj']).name})
         print('finished processing')
         exit()
+    elif args.task == 'segmentation':
+        print('Got here!')
+        print(datasets[0].transform.transforms)
+        post_transforms = Compose([Invertd(
+            keys="pred",
+            transform=datasets[0].transform,
+            orig_keys="inputs",
+            meta_keys="pred_meta_dict",
+            orig_meta_keys="inputs_meta_dict",
+            meta_key_postfix="meta_dict",
+            nearest_interp=False,
+            to_tensor=True)])
+        val_org_loader = DataLoader(datasets[0], batch_size=1, num_workers=1)
+        nifti_saver_pred = NiftiSaver(output_dir=inference_dir)
+        nifti_saver_img = NiftiSaver(output_dir=inference_dir, output_postfix='img')
+        nifti_saver_lab = NiftiSaver(output_dir=inference_dir, output_postfix='lab')
+        with torch.no_grad():
+            for val_data in val_org_loader:
+                val_data["pred"] = sliding_window_inference(
+                    inputs=val_data['inputs'].to(model.device),
+                    mode="gaussian",
+                    sw_device='cuda:0',
+                    roi_size=args.spatial_size,
+                    sw_batch_size=4,
+                    overlap=0.1,
+                    sigma_scale=0.125,
+                    predictor=model.inference_func)
+                val_data = [post_transforms(i) for i in decollate_batch(val_data)]
+                
+#                 val_data["pred"] = model.inference_func(val_data['inputs'].to(model.device))
+#                 val_data = [i for i in decollate_batch(val_data)]
+#                 print(val_data[0]['pred'].sum())
+#                 print(val_data[0]['pred'].shape)
+                
+                nifti_saver_pred.save(val_data[0]['pred'],
+                                 meta_data={
+                                     'filename_or_obj': Path(val_data[0]
+                                                             ['inputs_meta_dict'][
+                                                                 'filename_or_obj']).name})
+                nifti_saver_img.save(val_data[0]['inputs'],
+                                 meta_data={
+                                     'filename_or_obj': Path(val_data[0]
+                                                             ['inputs_meta_dict'][
+                                                                 'filename_or_obj']).name})
 #     if args.task == 'object_detection':
 #         for dataset in datasets:
 #             with torch.no_grad():
@@ -158,7 +203,7 @@ def patch_based_inference(args, model, inference_dir,
                         sw_batch_size=args.batch_size,
                         predictor=partial(model.inference_func, mode='box_out'),
                     )
-                    val_data = [i for i in decollate_batch(val_data)]
+                    val_data = [post_transforms(i) for i in decollate_batch(val_data)]
                     print(val_data[0]['pred'].sum())
                     nifti_saver_pred.save(val_data[0]['pred'],
                                      meta_data={

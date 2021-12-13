@@ -42,13 +42,15 @@ from src.paths import results_paths, data_paths, model_saving_paths, tensorboard
 from src.cyclegan import CycleganModel
 from src.mean_teacher import MeanTeacherModel
 from src.supervised_joint import SupervisedJointModel
-from src.supervised import SupervisedModel
+from src.supervised import SupervisedSegmentation3DModel
 from src.ada import ADAModel
 from src.ada_3d import ADA3DModel
+from src.ada_3d_dyn_unet import ADA3DDynUNETModel
 from src.icmsc import ICMSCModel
 from src.cycada import CycadaModel
 from src.supervised_retina_unet import SupervisedRetinaUNetModel
 from src.supervised_retina_unet_3d import SupervisedRetinaUNet3DModel
+from src.supervised_fcos_3d import SupervisedFCOS3DModel
 from src.ada_retina_unet import AdaRetinaUNetModel
 from src.ada_retina_unet_3d import AdaRetinaUNet3DModel
 
@@ -67,15 +69,15 @@ def train(args, model, starting_iteration,
 #     target_val_dl = loop_iterable(DataLoader(target_val_dataset, batch_size=args.batch_size,
 #                                                    shuffle=True, collate_fn=lambda x: x, drop_last=True, num_workers=4))
     source_dl = loop_iterable(ThreadDataLoader(source_train_dataset, batch_size=args.batch_size,
-                                         shuffle=True, collate_fn=lambda x: x, drop_last=True, num_workers=4, buffer_size=40,
+                                         shuffle=True, collate_fn=lambda x: x, drop_last=False, num_workers=4, buffer_size=40,
                                               persistent_workers=True, pin_memory=False))
     target_dl = loop_iterable(ThreadDataLoader(target_train_dataset, batch_size=args.batch_size,
-                                         shuffle=True, collate_fn=lambda x: x, drop_last=True, num_workers=1, buffer_size=14))
+                                         shuffle=True, collate_fn=lambda x: x, drop_last=False, num_workers=1, buffer_size=14))
     source_val_dl = loop_iterable(ThreadDataLoader(source_val_dataset, batch_size=args.batch_size,
-                                                   shuffle=True, collate_fn=lambda x: x, drop_last=True, num_workers=4, buffer_size=40,
+                                                   shuffle=True, collate_fn=lambda x: x, drop_last=False, num_workers=4, buffer_size=40,
                                                   persistent_workers=True, pin_memory=False))
     target_val_dl = loop_iterable(ThreadDataLoader(target_val_dataset, batch_size=args.batch_size,
-                                                   shuffle=True, collate_fn=lambda x: x, drop_last=True, num_workers=1, buffer_size=2))
+                                                   shuffle=True, collate_fn=lambda x: x, drop_last=False, num_workers=1, buffer_size=2))
     epoch = -1
     iteration = starting_iteration
     is_training = True
@@ -173,12 +175,14 @@ def main(args):
     model_factory = {'cyclegan': CycleganModel,
                      'ada': ADAModel,
                      'ada_3d': ADA3DModel,
+                     'ada_3d_dyn_unet': ADA3DDynUNETModel,
                      'mean_teacher': MeanTeacherModel,
                      'supervised_joint': SupervisedJointModel,
-                     'supervised': SupervisedModel,
+                     'supervised': SupervisedSegmentation3DModel,
                      'icmsc': ICMSCModel, 'cycada': CycadaModel,
                      'supervised_retina_unet': SupervisedRetinaUNetModel,
                      'supervised_retina_unet_3d': SupervisedRetinaUNet3DModel,
+                     'supervised_fcos_3d': SupervisedFCOS3DModel,
                      'ada_retina_unet': AdaRetinaUNetModel,
                      'ada_retina_unet_3d': AdaRetinaUNet3DModel
                     } # If you want to go 3D implement a new model...
@@ -191,25 +195,30 @@ def main(args):
                      'crossmoda': {0: 0, 1: 0, 2: 1},
                      'ms': {0: 0, 1: 1, 2: 1, 3: 1},
                      'microbleed': {0: 0, 1: 1, 2: 1, 3: 1},
+                     'tumour': {0: 0, 1: 1, 2: 0, 3: 0, 4: 1}
                     }.get(args.data_task, None)
     bboxes = True if args.task == 'object_detection' else False
     return_aug = True if args.method.startswith('ada') else False # If True, return augmented inputs
     #############################################################################
     source_train_dataset = dataset_factory(data_paths[os.uname().nodename][args.source], cf=args,
                                            exclude_slices = [], #list(range(70,192)) + list(range(20)),
+                                           training_aug=args.training_aug,
                                            spatial_dims=args.dims,
                                            spatial_size=args.spatial_size, split='train',
                                            dataset_split_csv=args.source_split,
                                            bounding_boxes=bboxes, return_aug=False, label_mapping=label_mapping)
     source_val_dataset = dataset_factory(data_paths[os.uname().nodename][args.source], cf=args,
+                                         training_aug=False,
                                          spatial_dims=args.dims,
                                          spatial_size=args.spatial_size, split='val', dataset_split_csv=args.source_split,
                                          bounding_boxes=bboxes, return_aug=False, label_mapping=label_mapping)
     target_train_dataset = dataset_factory(data_paths[os.uname().nodename][args.target], cf=args,
+                                           training_aug=False,
                                            spatial_size=args.spatial_size, split='train',
                                            exclude_slices = [], dataset_split_csv=args.target_split,
                                            bounding_boxes=bboxes, return_aug=return_aug, label_mapping=label_mapping)
     target_val_dataset = dataset_factory(data_paths[os.uname().nodename][args.target], cf=args,
+                                         training_aug=False,
                                          spatial_size=args.spatial_size, split='val', dataset_split_csv=args.target_split,
                                          bounding_boxes=bboxes, return_aug=return_aug, label_mapping=label_mapping)
     writer = SummaryWriter(tensorboard_folder+'/{}/{}_{}'.format(args.data_task, band, args.tag))
@@ -229,16 +238,14 @@ def main(args):
     if args.infer:
         source_infer_dataset, target_infer_dataset = None, None
         if args.source_inference_split != "null":
-            source_infer_dataset = dataset_factory(data_paths[os.uname().nodename][args.source],
-                                             spatial_size=args.spatial_size,
-                                             paddtarget=args.paddtarget, split='val',
-                                             slice_selection_method='mask', dataset_split_csv=args.source_inference_split,
-                                             bounding_boxes=False, return_aug=False, label_mapping=label_mapping)
+            source_infer_dataset = dataset_factory(data_paths[os.uname().nodename][args.source], cf=args,
+                                                   spatial_size=args.spatial_size, split='infer',
+                                                   dataset_split_csv=args.source_inference_split,
+                                                   bounding_boxes=False, return_aug=False, label_mapping=label_mapping)
         if args.target_inference_split != "null":
-            target_infer_dataset = dataset_factory(data_paths[os.uname().nodename][args.target],
-                                                   spatial_size=args.spatial_size,
-                                                   paddtarget=args.paddtarget, split='infer',
-                                                   slice_selection_method='mask', dataset_split_csv=args.target_inference_split,
+            target_infer_dataset = dataset_factory(data_paths[os.uname().nodename][args.target], cf=args,
+                                                   spatial_size=args.spatial_size, split='infer',
+                                                   dataset_split_csv=args.target_inference_split,
                                                    bounding_boxes=False, return_aug=False, label_mapping=label_mapping)
         inference_func(args=args, model=model,
                        source_dataset=source_infer_dataset,

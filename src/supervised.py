@@ -1,16 +1,20 @@
 import multiprocessing
-import os
 import sys
+import os
 import torch
 import torch.optim as optim
+import torch.nn.functional as F
 import numpy as np
 from functools import partial
+from monai.losses.dice import DiceLoss, DiceCELoss
+from monai.networks.nets import BasicUNet
 from src.base_model import BaseModel
-from src.networks import Destilation_student_matchingInstance, SplitHeadModel
+from src.networks import Discriminator3D, BasicUNetFeatures
 from src.utils import save_images
-from src.utils import bland_altman_loss, dice_soft_loss, ss_loss, generate_affine, non_geometric_augmentations, apply_transform
+from src.utils import bland_altman_loss, dice_soft_loss,\
+ss_loss, generate_affine, non_geometric_augmentations, apply_transform, create_overlap_image
 
-class SupervisedModel(BaseModel):
+class SupervisedSegmentation3DModel(BaseModel):
     def __init__(self, cf, writer, results_folder, models_folder, tensorboard_folder,
                  run_name, starting_epoch=0):
         super().__init__()
@@ -20,125 +24,86 @@ class SupervisedModel(BaseModel):
         self.tensorboard_folder = tensorboard_folder
         self.run_name = run_name
         self.starting_epoch = starting_epoch
-        self.seg_model = SplitHeadModel(self.cf.channels)
+        self.seg_model = BasicUNetFeatures(spatial_dims=3,
+                                           in_channels=self.cf.channels,
+                                           out_channels=2)
+        self.seg_model.cuda()
         self.writer = writer
         self.seg_optimizer = optim.Adam(self.seg_model.parameters(), lr=self.cf.lr)
-        self.scheduler = optim.lr_scheduler.MultiStepLR(self.seg_optimizer, milestones=[20000, 20000], gamma=0.1)
-        self.criterion = dice_soft_loss if self.cf.loss == 'dice' else bland_altman_loss
-        self.criterion2 = ss_loss
+        step_1 = 20000 if self.cf.data_task == 'ms' else 5000
+        step_2 = 20000 if self.cf.data_task == 'ms' else 10000
+        scheduler_S = optim.lr_scheduler.MultiStepLR(self.seg_optimizer, milestones=[step_1, step_2], gamma=0.1)
+        self.supervised_loss = DiceLoss(softmax=True)
+        self.dice_ce_loss = DiceCELoss(softmax=True, to_onehot_y=True)
         self.iterations = self.cf.iterations
-    
+
     def initialise(self):
         self.seg_model.cuda()
-        self.p = multiprocessing.Pool(10)
         
     def training_loop(self, source_dl, target_dl):
-        self.scheduler.step()
         source_batch = next(source_dl)
-        source_inputs, source_labels = (source_batch['inputs'].to(self.device),
-                                        source_batch['labels'].to(self.device))
-        target_batch = next(target_dl)
-        target_inputs, target_labels = (target_batch['inputs'].to(self.device),
-                                        target_batch['labels'].to(self.device))
-        # Training segmentation model from Generated T2s
-        outputs, outputs2, _, _, _, _, _, _, _, _, _  = self.seg_model(source_inputs)
-        tumour_labels = torch.where(source_labels == 1,
-                                    torch.ones_like(source_labels),
-                                    torch.zeros_like(source_labels))
-        cochlea_labels = torch.where(source_labels == 2,
-                                     torch.ones_like(source_labels),
-                                     torch.zeros_like(source_labels))
-        tumour_loss = dice_soft_loss(torch.sigmoid(outputs), tumour_labels)
-        cochlea_loss = dice_soft_loss(torch.sigmoid(outputs2), cochlea_labels)
-        supervised_loss = (tumour_loss + cochlea_loss) / 2.0
-        self.seg_model.zero_grad()
+        source_inputs, source_labels = (torch.tensor(np.stack([f[0]['inputs'] for f in source_batch])).to(self.device),
+                                        torch.tensor(np.stack([f[0]['labels'] for f in source_batch])).to(self.device))
+        self.seg_model.train()
+        source_outputs, _, _, _, _, _, _, _, _ = self.seg_model(source_inputs)        
+        supervised_loss = self.dice_ce_loss(source_outputs, source_labels)
+        self.seg_optimizer.zero_grad()
         supervised_loss.backward()
         self.seg_optimizer.step()
-        postfix_dict = {'tumour_loss': tumour_loss.item(),
-                        'cochlea_loss': cochlea_loss.item(),
-                        'supervised_loss': supervised_loss.item()}
+        
+        postfix_dict = {'loss': supervised_loss.item()}
         tensorboard_dict = {'source_inputs': source_inputs,
-                            'tumour_labels': tumour_labels,
-                            'cochlea_labels': cochlea_labels,
-                            'outputs_source_tumour': outputs,
-                            'outputs_source_cochlea': outputs2}
+                            'source_labels': source_labels,
+                            'source_outputs': source_outputs[:, 1:, ...]}
         return postfix_dict, tensorboard_dict
     
     def validation_loop(self, source_dl, target_dl):
         source_batch = next(source_dl)
-        source_inputs, source_labels = (source_batch['inputs'].to(self.device),
-                                        source_batch['labels'].to(self.device))
-        target_batch = next(target_dl)
-        target_inputs, target_labels = (target_batch['inputs'].to(self.device),
-                                        target_batch['labels'].to(self.device))
-        outputs, outputs2, _, _, _, _, _, _, _, _, _  = self.seg_model(source_inputs)
-        tumour_labels = torch.where(source_labels == 1,
-                                    torch.ones_like(source_labels),
-                                    torch.zeros_like(source_labels))
-        cochlea_labels = torch.where(source_labels == 2,
-                                     torch.ones_like(source_labels),
-                                     torch.zeros_like(source_labels))
-        tumour_loss = dice_soft_loss(torch.sigmoid(outputs), tumour_labels)
-        cochlea_loss = dice_soft_loss(torch.sigmoid(outputs2), cochlea_labels)
-        supervised_loss = (tumour_loss + cochlea_loss) / 2.0
-        postfix_dict = {'tumour_loss': tumour_loss.item(),
-                        'cochlea_loss': cochlea_loss.item(),
-                        'supervised_loss': supervised_loss.item()}
+        source_inputs, source_labels = (torch.tensor(np.stack([f[0]['inputs'] for f in source_batch])).to(self.device),
+                                        torch.tensor(np.stack([f[0]['labels'] for f in source_batch])).to(self.device))
+        self.seg_model.eval()
+        source_outputs, _, _, _, _, _, _, _, _ = self.seg_model(source_inputs)
+        supervised_loss = self.dice_ce_loss(source_outputs, source_labels)
+        
+        postfix_dict = {'loss': supervised_loss.item()}
         tensorboard_dict = {'source_inputs': source_inputs,
-                            'tumour_labels': tumour_labels,
-                            'cochlea_labels': cochlea_labels,
-                            'outputs_source_tumour': outputs,
-                            'outputs_source_cochlea': outputs2}
+                            'source_labels': source_labels,
+                            'source_outputs': source_outputs[:, 1:, ...]}
         return postfix_dict, tensorboard_dict
     
     def tensorboard_logging(self, postfix_dict, tensorboard_dict, split):
-        if self.cf.task == 'tumour':
-            for idx, modality in enumerate(['flair', 't1c', 't1', 't2']):
-                save_images(writer=self.writer, images=tensorboard_dict['source_inputs'][:, (idx,), :, :],
-                            normalize=True, sigmoid=False,
-                            iteration=self.iterations, name='source_' + modality)
-                save_images(writer=self.writer, images=tensorboard_dict['target_inputs'][:, (idx,), :, :],
-                            normalize=True, sigmoid=False,
-                            iteration=self.iterations, name='target_' + modality)
-                save_images(writer=self.writer, images=tensorboard_dict['inputstaug'][:, (idx,), :, :],
-                            normalize=True, sigmoid=False,
-                            iteration=self.iterations, name=modality + '_aug')
-        elif self.cf.task == 'ms':
+        if self.cf.data_task in ['ms_3d', 'microbleed_3d', 'crossmoda_3d', 'tumour']:
             save_images(writer=self.writer, images=tensorboard_dict['source_labels'], normalize=True, sigmoid=False,
-                        iteration=self.iterations, name='source_labels', png=True)
-            save_images(writer=self.writer, images=tensorboard_dict['target_labels'], normalize=True, sigmoid=False,
-                        iteration=self.iterations, name='target_labels', png=True)
-            save_images(writer=self.writer, images=tensorboard_dict['outputs'], normalize=False, sigmoid=True,
-                        iteration=self.iterations, name='outputs_source', png=True)
+                        iteration=self.iterations, name='source_labels/{}'.format(split), png=False)
+            save_images(writer=self.writer, images=tensorboard_dict['source_outputs'], normalize=False, sigmoid=True,
+                        iteration=self.iterations, name='source_outputs/{}'.format(split), png=False)
             save_images(writer=self.writer, images=tensorboard_dict['source_inputs'], normalize=True,
-                        sigmoid=False, png=True,
-                        iteration=self.iterations, name='source_inputs')
-            save_images(writer=self.writer, images=tensorboard_dict['target_inputs'], normalize=True,
-                        sigmoid=False, png=True,
-                        iteration=self.iterations, name='targets_inputs')
-        elif self.cf.task == 'crossmoda':
-            save_images(writer=self.writer, images=tensorboard_dict['source_inputs'], normalize=True,
-                                   sigmoid=False, png=False,
-                                   iteration=self.iterations, name='source_inputs/{}'.format(split))
-            save_images(writer=self.writer, images=tensorboard_dict['outputs_source_tumour'], normalize=False, sigmoid=True,
-                                   iteration=self.iterations, name='outputs_source_tumour/{}'.format(split), png=False)
-            save_images(writer=self.writer, images=tensorboard_dict['outputs_source_cochlea'], normalize=False, sigmoid=True,
-                                   iteration=self.iterations, name='outputs_source_cochlea/{}'.format(split), png=False)
-            save_images(writer=self.writer, images=tensorboard_dict['tumour_labels'], normalize=True, sigmoid=False,
-                                   iteration=self.iterations, name='tumour_labels/{}'.format(split), png=False)
-            save_images(writer=self.writer, images=tensorboard_dict['cochlea_labels'], normalize=True, sigmoid=False,
-                                   iteration=self.iterations, name='cochlea_labels/{}'.format(split), png=False)
-            for key, value in postfix_dict.items():
-                self.writer.add_scalar('{}/{}'.format(key, split), value, self.iterations)
-
+                        sigmoid=False, png=False,
+                        iteration=self.iterations, name='source_inputs/{}'.format(split))
+            create_overlap_image(writer=self.writer,
+                                 images=tensorboard_dict['source_inputs'],
+                                 preds=tensorboard_dict['source_outputs'],
+                                 labels=tensorboard_dict['source_labels'],
+                                 sigmoid=True,
+                                 iteration=self.iterations, name='source_confusion_plot/{}'.format(split))
+        for key, value in postfix_dict.items():
+            self.writer.add_scalar('{}/{}'.format(key, split), value, self.iterations)
                 
     def load(self, checkpoint_path):
         self.starting_epoch = int(os.path.basename(checkpoint_path.split('.')[0]).split('_')[-1])
         checkpoint = torch.load(checkpoint_path)
-        self.seg_model = self.seg_model.load_state_dict(checkpoint['seg_model'])
-        self.seg_optimizer = self.seg_optimizer.load_state_dict(checkpoint['seg_optimizer'])
+        self.seg_model.load_state_dict(checkpoint['seg_model'])
+        self.seg_optimizer.load_state_dict(checkpoint['seg_optimizer'])
     
     def save(self):
         torch.save({'seg_model': self.seg_model.state_dict(),
                     'seg_optimizer': self.seg_optimizer.state_dict(),
                    }, os.path.join(self.models_folder, self.run_name + '_{}.pt'.format(self.iterations)))
+        
+    def epoch_reset(self):
+        pass
+    
+    def inference_func(self, inference_inputs):
+        with torch.no_grad():
+            inference_outputs, _, _, _, _, _, _, _, _ = self.seg_model(inference_inputs)
+        return (torch.sigmoid(inference_outputs[:, 1:, ...]) > 0.5).float()

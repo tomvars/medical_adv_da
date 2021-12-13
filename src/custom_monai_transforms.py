@@ -101,80 +101,7 @@ def convert_seg_to_bounding_box_coordinates(
             target_output += [class_idx] * len(class_specific_bboxes)
         return pad_bboxes(convert_bbox_coordinate_format(np.array(bboxes)), img.shape, pad_bbox), target_output
 
-# def convert_seg_to_bounding_box_coordinates(img: np.ndarray,
-#     select_fn: Callable = is_positive,
-#     channel_indices: Optional[IndexSelection] = None,
-#     get_rois_from_seg_flag: bool = False,
-#     margin: Union[Sequence[int], int] = 0,
-# ) -> Tuple[List[int], List[int]]:
-#     """
-#         Args:
-#         img: source image to generate bounding box from.
-#         select_fn: function to select expected foreground, default is to select values > 0.
-#         channel_indices: if defined, select foreground only on the specified channels
-#             of image. if None, select foreground on the whole image.
-#         margin: add margin value to spatial dims of the bounding box, if only 1 value provided, use it for all dims.
-#     """
 
-#     bb_target = []
-#     roi_masks = []
-#     roi_labels = []
-#     out_seg = np.copy(img)
-#     for b in range(img.shape[0]):
-
-#         p_coords_list = []
-#         p_roi_masks_list = []
-#         p_roi_labels_list = []
-
-#         if np.sum(img[b]!=0) > 0:
-# #             if get_rois_from_seg_flag:
-# #                 clusters, n_cands = lb(img[b])
-# #                 data_dict['class_target'][b] = [data_dict['class_target'][b]] * n_cands
-# #             else:
-#             n_cands = int(np.max(img[b]))
-#             clusters = img[b]
-
-#             rois = np.array([(clusters == ii) * 1 for ii in range(1, n_cands + 1)])  # separate clusters and concat
-#             for rix, r in enumerate(rois):
-#                 if np.sum(r !=0) > 0: #check if the lesion survived data augmentation
-#                     seg_ixs = np.argwhere(r != 0)
-#                     coord_list = [np.min(seg_ixs[:, 1])-1, np.min(seg_ixs[:, 2])-1, np.max(seg_ixs[:, 1])+1,
-#                                      np.max(seg_ixs[:, 2])+1]
-#                     if dim == 3:
-
-#                         coord_list.extend([np.min(seg_ixs[:, 3])-1, np.max(seg_ixs[:, 3])+1])
-
-#                     p_coords_list.append(coord_list)
-#                     p_roi_masks_list.append(r)
-#                     # add background class = 0. rix is a patient wide index of lesions. since 'class_target' is
-#                     # also patient wide, this assignment is not dependent on patch occurrances.
-#                     p_roi_labels_list.append(data_dict['class_target'][b][rix] + 1)
-
-#                 if class_specific_seg_flag:
-#                     out_seg[b][img[b] == rix + 1] = data_dict['class_target'][b][rix] + 1
-
-#             if not class_specific_seg_flag:
-#                 out_seg[b][img[b] > 0] = 1
-
-#             bb_target.append(np.array(p_coords_list))
-#             roi_masks.append(np.array(p_roi_masks_list).astype('uint8'))
-#             roi_labels.append(np.array(p_roi_labels_list))
-
-
-#         else:
-#             bb_target.append([])
-#             roi_masks.append(np.zeros_like(img[b])[None])
-#             roi_labels.append(np.array([-1]))
-
-#     if get_rois_from_seg_flag:
-#         data_dict.pop('class_target', None)
-
-#     bb_target = np.array(bb_target)
-#     roi_masks = np.array(roi_masks)
-#     class_target = np.array(roi_labels)
-#     seg = out_seg
-
-#     return bb_target, roi_masks, class_target, seg
 
 ## This would live in monai/transforms/utility/array.py
 class BoundingBoxes(Transform):
@@ -213,7 +140,6 @@ class BoundingBoxes(Transform):
                                                        foreground_classes=self.foreground_classes,
                                                        pad_bbox=self.pad_bbox
                                                       )
-    
     
 ## This would live in monai/transforms/utility/dictionary.py
 class BoundingBoxesd(MapTransform):

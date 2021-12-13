@@ -89,7 +89,7 @@ class RandStochaticWeightedCropd(Randomizable, MapTransform, InvertibleTransform
         if random.random() < self.prob:
             self.randomize(d[self.w_key])
         else:
-            if isinstance(d[self.w_key], np.array):                
+            if isinstance(d[self.w_key], np.ndarray):                
                 self.randomize(np.ones_like(d[self.w_key]))
             elif isinstance(d[self.w_key], torch.tensor):
                 self.randomize(torch.ones_like(d[self.w_key]))

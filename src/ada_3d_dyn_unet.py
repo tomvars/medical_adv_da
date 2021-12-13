@@ -8,13 +8,14 @@ import numpy as np
 from functools import partial
 from monai.losses.dice import DiceLoss, DiceCELoss
 from monai.networks.nets import BasicUNet
+from monai.optimizers.lr_scheduler import WarmupCosineSchedule
 from src.base_model import BaseModel
-from src.networks import Discriminator3D, BasicUNetFeatures
+from src.networks import Discriminator3D_retina, BasicUNetFeatures, bigUNet
 from src.utils import save_images
 from src.utils import bland_altman_loss, dice_soft_loss,\
 ss_loss, generate_affine, non_geometric_augmentations, apply_transform, create_overlap_image
 
-class ADA3DModel(BaseModel):
+class ADA3DDynUNETModel(BaseModel):
     def __init__(self, cf, writer, results_folder, models_folder, tensorboard_folder,
                  run_name, starting_epoch=0):
         super().__init__()
@@ -24,21 +25,28 @@ class ADA3DModel(BaseModel):
         self.tensorboard_folder = tensorboard_folder
         self.run_name = run_name
         self.starting_epoch = starting_epoch
-        self.seg_model = BasicUNetFeatures(spatial_dims=3,
-                                           in_channels=self.cf.channels,
-                                           out_channels=2)
+        self.seg_model = bigUNet(spatial_dims=3,
+                                 in_channels=self.cf.channels,
+                                 out_channels=2,
+                                 features=(64, 96, 128, 192, 256, 384, 512, 64) #(32, 48, 64, 96, 128, 192, 256, 32)
+                                )
         self.seg_model.cuda()
         self.writer = writer
         self.seg_optimizer = optim.Adam(self.seg_model.parameters(), lr=self.cf.lr)
-        step_1 = 20000 if self.cf.data_task == 'ms' else 5000
-        step_2 = 20000 if self.cf.data_task == 'ms' else 10000
-        scheduler_S = optim.lr_scheduler.MultiStepLR(self.seg_optimizer, milestones=[step_1, step_2], gamma=0.1)
+#         step_1 = 20000 if self.cf.data_task == 'ms' else 5000
+#         step_2 = 20000 if self.cf.data_task == 'ms' else 10000
+#         scheduler_S = optim.lr_scheduler.CosineAnnealingLR(self.seg_optimizer, milestones=[step_1, step_2], gamma=0.1)
+        self.seg_scheduler = WarmupCosineSchedule(
+            optimizer=self.seg_optimizer,
+            warmup_steps=250,
+            t_total=self.cf.iterations
+        )
         self.self_supervised_loss = dice_soft_loss
         self.supervised_loss = DiceLoss(softmax=True)
         self.dice_ce_loss = DiceCELoss(softmax=True, to_onehot_y=True)
         self.iterations = self.cf.iterations
         # Discriminator setup #
-        self.discriminator = Discriminator3D(256, 2, self.cf.discriminator_complexity).cuda()
+        self.discriminator = Discriminator3D_retina(1120, 2, self.cf.discriminator_complexity).cuda()
         self.discriminator_optimizer = optim.Adam(self.discriminator.parameters(), lr=1e-4)
         ########################
         self.correct = 0
@@ -61,27 +69,35 @@ class ADA3DModel(BaseModel):
         target_batch = next(target_dl)
         target_inputs, target_inputs_aug = (torch.tensor(np.stack([f[0]['inputs'] for f in target_batch])).to(self.device),
                                             torch.tensor(np.stack([f[0]['inputs_aug'] for f in target_batch])).to(self.device))
-        source_outputs, _, _, _, _, _, _, _, _ = self.seg_model(source_inputs)
+        source_outputs, _, _, _, _, _, _ = self.seg_model(source_inputs)
         if self.discriminator_acc < 0.75:
             # Training Discriminator
             self.seg_model.eval()
             self.discriminator.train()
             inputs_models_discriminator = torch.cat((source_inputs, target_inputs_aug), 0)
-            labels_discriminator = torch.cat((torch.zeros(source_inputs.size(0)),
-                                              torch.ones(target_inputs_aug.size(0))),
-                                             0).type(torch.LongTensor).to(self.device)
-            _, _, _, _, _, dec4, dec3, dec2, dec1 = self.seg_model(inputs_models_discriminator)
-            dec1 = F.interpolate(dec1, size=dec1.size()[2:], mode='trilinear')
-            dec2 = F.interpolate(dec2, size=dec1.size()[2:], mode='trilinear')
-            dec3 = F.interpolate(dec3, size=dec1.size()[2:], mode='trilinear')
-            dec4 = F.interpolate(dec4, size=dec1.size()[2:], mode='trilinear')
-            inputs_discriminator = torch.cat((dec1, dec2, dec3, dec4), 1)
+            
+            _, dec6, dec5, dec4, dec3, dec2, dec1 = self.seg_model(inputs_models_discriminator)
+            dec1 = F.interpolate(dec1, size=dec3.size()[2:], mode='trilinear')
+            dec2 = F.interpolate(dec2, size=dec3.size()[2:], mode='trilinear')
+            dec3 = F.interpolate(dec3, size=dec3.size()[2:], mode='trilinear')
+            dec4 = F.interpolate(dec4, size=dec3.size()[2:], mode='trilinear')
+            dec5 = F.interpolate(dec5, size=dec3.size()[2:], mode='trilinear')
+            dec6 = F.interpolate(dec6, size=dec3.size()[2:], mode='trilinear')
+            
+            inputs_discriminator = torch.cat((dec1, dec2, dec3, dec4, dec5, dec6), 1)
+            
             self.discriminator.zero_grad()
             outputs_discriminator = self.discriminator(inputs_discriminator)
+            labels_discriminator = torch.cat((torch.zeros_like(dec3)[:source_inputs.size(0), 0, ...],
+                                              torch.ones_like(dec3)[:target_inputs_aug.size(0), 0, ...]),
+                                             0).type(torch.LongTensor).to(self.device)
             loss_discriminator = torch.nn.CrossEntropyLoss(size_average=True)(outputs_discriminator,
                                                                               labels_discriminator)
             loss_discriminator.backward()
             self.discriminator_optimizer.step()
+            del dec1, dec2, dec3, dec4, dec5, dec6
+            torch.cuda.empty_cache()
+        
         
         
         # Train seg model
@@ -90,32 +106,34 @@ class ADA3DModel(BaseModel):
         target_batch = next(target_dl)
         target_inputs, target_inputs_aug = (torch.tensor(np.stack([f[0]['inputs'] for f in target_batch])).to(self.device),
                                             torch.tensor(np.stack([f[0]['inputs_aug'] for f in target_batch])).to(self.device))
-        
-        target_outputs, _, _, _, _, _, _, _, _ = self.seg_model(target_inputs)
-        target_outputs_aug, _, _, _, _, _, _, _, _ = self.seg_model(target_inputs_aug)
+        with torch.no_grad():
+            target_outputs, _, _, _, _, _, _ = self.seg_model(target_inputs)
+        target_outputs_aug, _, _, _, _, _, _ = self.seg_model(target_inputs_aug)
         affines = torch.tensor(np.stack([f[0]['inputs_aug_transforms'][-2]['extra_info']['affine'] for f in target_batch])).to(self.device)
         grid = F.affine_grid(affines[:, :3, :],
                              size=[target_outputs.shape[0]] + [1] + self.cf.spatial_size
                             ).type(torch.FloatTensor).to(self.device)
         target_outputs_transformed = F.grid_sample(target_outputs,
                                                    grid=grid, padding_mode="border")
-        pc_loss = alpha * self.self_supervised_loss(torch.sigmoid(target_outputs_aug[:, 1:, ...]),
+        pc_loss = self.self_supervised_loss(torch.sigmoid(target_outputs_aug[:, 1:, ...]),
                                                     torch.sigmoid(target_outputs_transformed[:, 1:, ...]))
         inputs_models_discriminator = torch.cat((source_inputs, target_inputs_aug), 0)
-        _, _, _, _, _, dec4, dec3, dec2, dec1 = self.seg_model(inputs_models_discriminator)
-        dec1 = F.interpolate(dec1, size=dec1.size()[2:], mode='trilinear')
-        dec2 = F.interpolate(dec2, size=dec1.size()[2:], mode='trilinear')
-        dec3 = F.interpolate(dec3, size=dec1.size()[2:], mode='trilinear')
-        dec4 = F.interpolate(dec4, size=dec1.size()[2:], mode='trilinear')
-        inputs_discriminator = torch.cat((dec1, dec2, dec3, dec4), 1)
+        _, dec6, dec5, dec4, dec3, dec2, dec1 = self.seg_model(inputs_models_discriminator)
+        dec1 = F.interpolate(dec1, size=dec3.size()[2:], mode='trilinear')
+        dec2 = F.interpolate(dec2, size=dec3.size()[2:], mode='trilinear')
+        dec3 = F.interpolate(dec3, size=dec3.size()[2:], mode='trilinear')
+        dec4 = F.interpolate(dec4, size=dec3.size()[2:], mode='trilinear')
+        dec5 = F.interpolate(dec5, size=dec3.size()[2:], mode='trilinear')
+        dec6 = F.interpolate(dec6, size=dec3.size()[2:], mode='trilinear')
+        inputs_discriminator = torch.cat((dec1, dec2, dec3, dec4, dec5, dec6), 1)
         outputs_discriminator = self.discriminator(inputs_discriminator)
-        labels_discriminator = torch.cat((torch.zeros(source_inputs.size(0)),
-                                          torch.ones(target_inputs_aug.size(0))),
-                                         0).type(torch.LongTensor).to(self.device)
+        labels_discriminator = torch.cat((torch.zeros_like(dec3)[:source_inputs.size(0), 0, ...],
+                                              torch.ones_like(dec3)[:target_inputs_aug.size(0), 0, ...]),
+                                             0).type(torch.LongTensor).to(self.device)
         loss_discriminator = torch.nn.CrossEntropyLoss(size_average=True)(outputs_discriminator,
                                                                           labels_discriminator)
         self.correct += (torch.argmax(outputs_discriminator, dim=1) == labels_discriminator).float().sum()
-        self.num_of_subjects += int(outputs_discriminator.size(0))
+        self.num_of_subjects += int(outputs_discriminator.numel() / 2)
         self.discriminator_acc = (self.correct/self.num_of_subjects).item()
 
 #         supervised_loss = self.supervised_loss(source_outputs, source_labels)
@@ -127,10 +145,10 @@ class ADA3DModel(BaseModel):
         supervised_loss = self.dice_ce_loss(source_outputs, source_labels)
         adversarial_loss = - beta * loss_discriminator
         self.seg_optimizer.zero_grad()
-        loss = supervised_loss + pc_loss + adversarial_loss
+        loss = supervised_loss + alpha *  pc_loss + adversarial_loss
         loss.backward()
         self.seg_optimizer.step()
-        
+        self.seg_scheduler.step()
         # For debugging
         with torch.no_grad():
             target_labels = torch.tensor(np.stack([f[0]['labels'] for f in target_batch])).to(self.device)
@@ -145,15 +163,15 @@ class ADA3DModel(BaseModel):
                         'acc_discriminator': (self.correct/self.num_of_subjects).item(),
                         'target_loss': target_loss.item()
                        }
-        tensorboard_dict = {'source_inputs': source_inputs,
-                            'target_inputs': target_inputs,
-                            'target_inputs_aug': target_inputs_aug,
-                            'target_labels': target_labels,
-                            'source_labels': source_labels,
-                            'source_outputs': source_outputs[:, 1:, ...],
-                            'target_outputs': target_outputs[:, 1:, ...],
-                            'target_outputs_transformed': target_outputs_transformed[:, 1:, ...],
-                            'target_outputs_aug': target_outputs_aug[:, 1:, ...]
+        tensorboard_dict = {'source_inputs': source_inputs.detach(),
+                            'target_inputs': target_inputs.detach(),
+                            'target_inputs_aug': target_inputs_aug.detach(),
+                            'target_labels': target_labels.detach(),
+                            'source_labels': source_labels.detach(),
+                            'source_outputs': source_outputs[:, 1:, ...].detach(),
+                            'target_outputs': target_outputs[:, 1:, ...].detach(),
+                            'target_outputs_transformed': target_outputs_transformed[:, 1:, ...].detach(),
+                            'target_outputs_aug': target_outputs_aug[:, 1:, ...].detach()
                            }
         return postfix_dict, tensorboard_dict
     
@@ -171,7 +189,7 @@ class ADA3DModel(BaseModel):
             target_batch = next(target_dl)
             target_inputs, target_inputs_aug = (torch.tensor(np.stack([f[0]['inputs'] for f in target_batch])).to(self.device),
                                                 torch.tensor(np.stack([f[0]['inputs_aug'] for f in target_batch])).to(self.device))
-            source_outputs, _, _, _, _, _, _, _, _ = self.seg_model(source_inputs)
+            source_outputs, _, _, _, _, _, _ = self.seg_model(source_inputs)
 
             # Eval seg model
             self.seg_model.eval()
@@ -181,8 +199,8 @@ class ADA3DModel(BaseModel):
                                                 torch.tensor(np.stack([f[0]['inputs_aug'] for f in target_batch])).to(self.device))
             # For debugging
             target_labels = torch.tensor(np.stack([f[0]['labels'] for f in target_batch])).to(self.device)
-            target_outputs, _, _, _, _, _, _, _, _ = self.seg_model(target_inputs)
-            target_outputs_aug, _, _, _, _, _, _, _, _ = self.seg_model(target_inputs_aug)
+            target_outputs, _, _, _, _, _, _ = self.seg_model(target_inputs)
+            target_outputs_aug, _, _, _, _, _, _ = self.seg_model(target_inputs_aug)
             affines = torch.tensor(np.stack([f[0]['inputs_aug_transforms'][-2]['extra_info']['affine'] for f in target_batch])).to(self.device)
             grid = F.affine_grid(affines[:, :3, :],
                                  size=[target_outputs.shape[0]] + [1] + self.cf.spatial_size
@@ -192,20 +210,22 @@ class ADA3DModel(BaseModel):
             pc_loss = alpha * self.self_supervised_loss(torch.sigmoid(target_outputs_aug[:, 1:, ...]),
                                                         torch.sigmoid(target_outputs_transformed[:, 1:, ...]))
             inputs_models_discriminator = torch.cat((source_inputs, target_inputs_aug), 0)
-            _, _, _, _, _, dec4, dec3, dec2, dec1 = self.seg_model(inputs_models_discriminator)
-            dec1 = F.interpolate(dec1, size=dec1.size()[2:], mode='trilinear')
-            dec2 = F.interpolate(dec2, size=dec1.size()[2:], mode='trilinear')
-            dec3 = F.interpolate(dec3, size=dec1.size()[2:], mode='trilinear')
-            dec4 = F.interpolate(dec4, size=dec1.size()[2:], mode='trilinear')
-            inputs_discriminator = torch.cat((dec1, dec2, dec3, dec4), 1)
+            _, dec6, dec5, dec4, dec3, dec2, dec1 = self.seg_model(inputs_models_discriminator)
+            dec1 = F.interpolate(dec1, size=dec3.size()[2:], mode='trilinear')
+            dec2 = F.interpolate(dec2, size=dec3.size()[2:], mode='trilinear')
+            dec3 = F.interpolate(dec3, size=dec3.size()[2:], mode='trilinear')
+            dec4 = F.interpolate(dec4, size=dec3.size()[2:], mode='trilinear')
+            dec5 = F.interpolate(dec5, size=dec3.size()[2:], mode='trilinear')
+            dec6 = F.interpolate(dec6, size=dec3.size()[2:], mode='trilinear')
+            inputs_discriminator = torch.cat((dec1, dec2, dec3, dec4, dec5, dec6), 1)
             outputs_discriminator = self.discriminator(inputs_discriminator)
-            labels_discriminator = torch.cat((torch.zeros(source_inputs.size(0)),
-                                              torch.ones(target_inputs_aug.size(0))),
+            labels_discriminator = torch.cat((torch.zeros_like(dec3)[:source_inputs.size(0), 0, ...],
+                                              torch.ones_like(dec3)[:target_inputs_aug.size(0), 0, ...]),
                                              0).type(torch.LongTensor).to(self.device)
             loss_discriminator = torch.nn.CrossEntropyLoss(size_average=True)(outputs_discriminator,
                                                                               labels_discriminator)
             self.correct += (torch.argmax(outputs_discriminator, dim=1) == labels_discriminator).float().sum()
-            self.num_of_subjects += int(outputs_discriminator.size(0))
+            self.num_of_subjects += int(outputs_discriminator.numel() / 2)
             supervised_loss = dice_soft_loss(torch.sigmoid(source_outputs[:, 1:, ...]), source_labels)
             adversarial_loss = - beta * loss_discriminator        
             loss = supervised_loss + pc_loss + adversarial_loss
@@ -222,15 +242,15 @@ class ADA3DModel(BaseModel):
                             'acc_discriminator': (self.correct/self.num_of_subjects).item(),
                             'target_loss': target_loss.item()
                            }
-            tensorboard_dict = {'source_inputs': source_inputs,
-                            'target_inputs': target_inputs,
-                            'target_inputs_aug': target_inputs_aug,
-                            'target_labels': target_labels,
-                            'source_labels': source_labels,
-                            'source_outputs': source_outputs[:, 1:, ...],
-                            'target_outputs': target_outputs[:, 1:, ...],
-                            'target_outputs_transformed': target_outputs_transformed[:, 1:, ...],
-                            'target_outputs_aug': target_outputs_aug[:, 1:, ...]
+            tensorboard_dict = {'source_inputs': source_inputs.detach(),
+                            'target_inputs': target_inputs.detach(),
+                            'target_inputs_aug': target_inputs_aug.detach(),
+                            'target_labels': target_labels.detach(),
+                            'source_labels': source_labels.detach(),
+                            'source_outputs': source_outputs[:, 1:, ...].detach(),
+                            'target_outputs': target_outputs[:, 1:, ...].detach(),
+                            'target_outputs_transformed': target_outputs_transformed[:, 1:, ...].detach(),
+                            'target_outputs_aug': target_outputs_aug[:, 1:, ...].detach()
                            }
         return postfix_dict, tensorboard_dict
     
@@ -273,9 +293,11 @@ class ADA3DModel(BaseModel):
         self.starting_epoch = int(os.path.basename(checkpoint_path.split('.')[0]).split('_')[-1])
         checkpoint = torch.load(checkpoint_path)
         self.seg_model.load_state_dict(checkpoint['seg_model'])
-#         self.discriminator.load_state_dict(checkpoint['discriminator'])
-#         self.discriminator_optimizer.load_state_dict(checkpoint['optimizer_discriminator'])
+        self.discriminator.load_state_dict(checkpoint['discriminator'])
+        self.discriminator_optimizer.load_state_dict(checkpoint['optimizer_discriminator'])
         self.seg_optimizer.load_state_dict(checkpoint['seg_optimizer'])
+        del checkpoint  # dereference seems crucial
+        torch.cuda.empty_cache()
     
     def save(self):
         torch.save({'seg_model': self.seg_model.state_dict(),
@@ -290,5 +312,5 @@ class ADA3DModel(BaseModel):
         
     def inference_func(self, inference_inputs):
         with torch.no_grad():
-            inference_outputs, _, _, _, _, _, _, _, _ = self.seg_model(inference_inputs)
+            inference_outputs, _, _, _, _, _, _  = self.seg_model(inference_inputs)
         return (torch.sigmoid(inference_outputs[:, 1:, ...]) > 0.5).float()
