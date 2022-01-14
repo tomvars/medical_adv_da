@@ -120,8 +120,8 @@ def patch_based_inference(args, model, inference_dir,
                     sw_device='cuda:0',
                     roi_size=args.spatial_size,
                     sw_batch_size=4,
-                    overlap=0.1,
-                    sigma_scale=0.125,
+                    overlap=0.75,
+                    sigma_scale=0.05,
                     predictor=model.inference_func)
                 val_data = [post_transforms(i) for i in decollate_batch(val_data)]
                 

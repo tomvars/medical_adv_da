@@ -16,6 +16,7 @@
   "iterations_adapt": 1000,
   "thssaving": 0.2,
   "thstesting": 0.01,
+  "use_boundary_loss": 0,
   "alpha_lweights": 0.3,
   "beta_lweights": 0.1,
   "source": "ms_combined",

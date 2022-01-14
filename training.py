@@ -91,11 +91,16 @@ def train(args, model, starting_iteration,
             model.epoch_reset()
             # Training loop
             with tqdm(total=len(train_mini_batch_indices), file=sys.stdout) as pbar:
-                for indb, _ in enumerate(train_mini_batch_indices):                   
+                for indb, _ in enumerate(train_mini_batch_indices):
+                    if indb >= args.max_iterations_per_epoch:
+                        print(f'Stopping epoch at {indb} iterations')
+                        break
                     pbar.update(1)
                     iteration = epoch * len(train_mini_batch_indices) + indb
                     model.iterations = iteration
                     postfix_dict, tensorboard_dict = model.training_loop(source_dl, target_dl)
+                    if postfix_dict is None and tensorboard_dict is None:
+                        continue
                     pbar.set_postfix(postfix_dict)
                     if iteration % args.tensorboard_every_n == 0:
                         print('Got here?')
@@ -203,22 +208,26 @@ def main(args):
     source_train_dataset = dataset_factory(data_paths[os.uname().nodename][args.source], cf=args,
                                            exclude_slices = [], #list(range(70,192)) + list(range(20)),
                                            training_aug=args.training_aug,
+                                           include_dist_map=args.use_boundary_loss,
                                            spatial_dims=args.dims,
                                            spatial_size=args.spatial_size, split='train',
                                            dataset_split_csv=args.source_split,
                                            bounding_boxes=bboxes, return_aug=False, label_mapping=label_mapping)
     source_val_dataset = dataset_factory(data_paths[os.uname().nodename][args.source], cf=args,
                                          training_aug=False,
+                                         include_dist_map=args.use_boundary_loss,
                                          spatial_dims=args.dims,
                                          spatial_size=args.spatial_size, split='val', dataset_split_csv=args.source_split,
                                          bounding_boxes=bboxes, return_aug=False, label_mapping=label_mapping)
     target_train_dataset = dataset_factory(data_paths[os.uname().nodename][args.target], cf=args,
                                            training_aug=False,
+                                           include_dist_map=args.use_boundary_loss,
                                            spatial_size=args.spatial_size, split='train',
                                            exclude_slices = [], dataset_split_csv=args.target_split,
                                            bounding_boxes=bboxes, return_aug=return_aug, label_mapping=label_mapping)
     target_val_dataset = dataset_factory(data_paths[os.uname().nodename][args.target], cf=args,
                                          training_aug=False,
+                                         include_dist_map=args.use_boundary_loss,
                                          spatial_size=args.spatial_size, split='val', dataset_split_csv=args.target_split,
                                          bounding_boxes=bboxes, return_aug=return_aug, label_mapping=label_mapping)
     writer = SummaryWriter(tensorboard_folder+'/{}/{}_{}'.format(args.data_task, band, args.tag))
@@ -295,6 +304,7 @@ if __name__ == '__main__':
     parser.add_argument('--source_inference_split', type=str, help='path to dataset_split.csv for inference (split column is ignored)')
     parser.add_argument('--target_inference_split', type=str, help='path to dataset_split.csv for inference (split column is ignored)')
     parser.add_argument('--save_every_n', type=int)
+    parser.add_argument('--max_iterations_per_epoch', type=int, default=10000)
     parser.add_argument('--tensorboard_every_n', type=int)
     parser.add_argument('--val_tensorboard_every_n_epochs', type=int, default=1)
     parser.add_argument('--use_fixmatch', type=int)
@@ -305,6 +315,7 @@ if __name__ == '__main__':
     parser.add_argument('--infer', type=int, help='0 if training else 1')
     parser.add_argument('--tumour_only', type=int, help='1 if tumour only labels to be used else 0')
     parser.add_argument('--training_aug', type=int, help='1 if training_aug else 0')
+    parser.add_argument('--use_boundary_loss', type=int, help='1 if use_boundary_loss else 0')
     parser.add_argument('--spatial_size', nargs='+', help='e.g 256 256')
     parser.add_argument('--spatial_crop_center', nargs='+', help='e.g 100, 138, 40')
     parser.add_argument('--spatial_crop_roi', nargs='+', help='e.g 168, 168, 80')
@@ -313,7 +324,8 @@ if __name__ == '__main__':
     config = load_default_config(args.data_task, args.dims) if args.config is None else json.load(open(args.config, 'r'))
     arg_dict = vars(args)
     for key, value in arg_dict.items():
-        arg_dict[key] = config[key] if value is None else value
+        if key in config:
+            arg_dict[key] = config[key] if value is None else value
     arg_dict['spatial_size'] = [int(f) for f in arg_dict['spatial_size']]
     # hostname_dir = {'dgx1-1': '/raid/tomvars', 'pretzel': '/raid/tom', 'bd0795ec38f7': '/data2/tom'}
     # if args.checkpoint != "null" and args.checkpoint is not None:

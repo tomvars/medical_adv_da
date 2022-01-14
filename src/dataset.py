@@ -7,7 +7,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from pathlib import Path
 from src.utils import batch_adaptation, to_var_gpu
-from src.custom_monai_transforms import BoundingBoxesd
+from src.custom_monai_transforms import BoundingBoxesd, DistanceMapd
 from monai.data.dataset import PersistentDataset as MonaiDataset
 from monai.data.nifti_saver import NiftiSaver
 from monai.transforms import (LoadImaged,
@@ -31,6 +31,7 @@ from monai.transforms import (LoadImaged,
                               Spacingd,
                               RepeatChanneld,
                               Resized,
+                              ResizeWithPadOrCropd,
                               RandSpatialCropd,
                               RandSpatialCropSamplesd,
                               RandBiasFieldd,
@@ -125,7 +126,7 @@ def get_monai_patch_dataset(data_dir, cf, dataset_split_csv, split,
                             spatial_size=[128, 128, 24], spatial_dims=3, exclude_slices=None,
                             training_aug=False, include_dist_map=False,
                             synthesis=True, bounding_boxes=False,
-                            return_aug=False, label_mapping=None):
+                            return_aug=False, label_mapping=None, **affine_kwargs):
     """
     This function object expects a data_dir which contains the following structure:
     data_dir
@@ -142,6 +143,14 @@ def get_monai_patch_dataset(data_dir, cf, dataset_split_csv, split,
               ----- wmh_<subject id as int>.nii.gz
               ----- wmh_<subject id as int>.nii.gz
     """
+    print('GOT HEREREE!!')
+    affine_kwargs.setdefault('prob', 1.0)
+    affine_kwargs.setdefault('rotate_range', (0.2, 0.2, 0.2))
+    affine_kwargs.setdefault('shear_range', 0.0)
+    affine_kwargs.setdefault('translate_range', (0.1, 0.1, 0.1))
+    affine_kwargs.setdefault('scale_range', 0.0)
+    affine_kwargs.setdefault('padding_mode', "zeros")
+    print(affine_kwargs)
     data_dir = os.path.join(data_dir, 'whole')
     assert 'flair' in os.listdir(data_dir)
     assert 'labels' in os.listdir(data_dir)
@@ -166,8 +175,9 @@ def get_monai_patch_dataset(data_dir, cf, dataset_split_csv, split,
             AddChanneld(keys=['inputs', 'labels']),
             Spacingd(keys=['inputs'], pixdim=[1.0, 1.0, 1.0], mode='bilinear'),
             Spacingd(keys=['labels'], pixdim=[1.0, 1.0, 1.0], mode='nearest'),
-            CopyItemsd(keys=['labels'], times=1, names=['weight_map']),
-            CropForegroundd(keys=['inputs', 'labels'], source_key='inputs', margin=(20, 20, 20)),
+            #CopyItemsd(keys=['labels'], times=1, names=['weight_map']),
+            CropForegroundd(keys=['inputs', 'labels'], source_key='inputs', margin=(5, 5, 5)),
+            #Resized(keys=['inputs', 'labels'], spatial_size=spatial_size)
         ]
         if training_aug:
             # RandAffine when not doing ADA
@@ -184,16 +194,10 @@ def get_monai_patch_dataset(data_dir, cf, dataset_split_csv, split,
                                                    alpha=(0.0, 1.0),
                                                    allow_missing_keys=False,
                                                    as_tensor_output=True))
-            
             transforms_list.append(RandAffined(
                 keys=["inputs"],
                 allow_missing_keys=True,
-                #spatial_size=spatial_size,
-                prob=1.0,
-                rotate_range=0.1,
-                shear_range=0.0,
-                translate_range=(0.1, 0.1, 0.1),
-                scale_range=[-0.1, 0.1],
+                **affine_kwargs
             ))
             transforms_list.append(RandGaussianSmoothd(
                 keys=['inputs'],
@@ -211,10 +215,6 @@ def get_monai_patch_dataset(data_dir, cf, dataset_split_csv, split,
                     SpatialCropd(keys=['inputs', 'labels'],
                                  roi_center=cf.spatial_crop_center,
                                  roi_size=cf.spatial_crop_roi))
-#         transforms_list.append(
-#             RandSpatialCropSamplesd(keys=['inputs', 'labels'],
-#                           roi_size=spatial_size, num_samples=1, random_size=False))
-# RandStochaticWeightedCropd
         if isinstance(label_mapping, dict):
                     transforms_list.append(MapLabelValued(keys=['labels'],
                                                           orig_labels=label_mapping.keys(),
@@ -233,35 +233,12 @@ def get_monai_patch_dataset(data_dir, cf, dataset_split_csv, split,
                           roi_size=spatial_size, num_samples=1, random_size=False))
         else:
             raise NotImplemented
-#         transfroms_list.append(
-#             RandCropByPosNegLabeld(keys=[],
-#                                    label_key='labels',
-#                                    spatial_size,
-#                                    pos=1.0, neg=1.0,
-#                                    num_samples=1,)
-#         )
-#         transforms_list.append(
-#             Resized(keys=['inputs', 'labels'],
-#                     spatial_size=spatial_size
-#                    )
-#         )
-#         transforms_list.append(
-#             RepeatChanneld(keys=['inputs', 'labels'], repeats=1)
-#         )
-#         transforms_list.append(
-#             SplitChanneld(keys=['inputs', 'labels'])
-#         )
         if bounding_boxes:
             transforms_list.append(BoundingBoxesd(keys=['labels'], pad_bbox=0)) #2 for EPAD_SWI 
-            #transforms_list.append(AddChanneld(keys=['inputs', 'labels']))
         if include_dist_map:
-            transforms_list.append(BoundingBoxesd(keys=['labels'], pad_bbox=0))
+            transforms_list.append(DistanceMapd(keys=['labels'], spatial_size=spatial_size))
         if return_aug:
             transforms_list.append(CopyItemsd(keys=["inputs"], names=["inputs_aug"], times=1))
-#             transforms_list.append(RandBiasFieldd(keys=['inputs_aug'],
-#                                                   degree=3,
-#                                                   coeff_range=(0.0, 0.1),
-#                                                   prob=0.5))
             transforms_list.append(RandAdjustContrastd(keys=['inputs_aug'],
                                                        prob=0.5,
                                                        gamma=(0.5, 1.5)))
@@ -278,13 +255,7 @@ def get_monai_patch_dataset(data_dir, cf, dataset_split_csv, split,
             transforms_list.append(RandAffined(
                 keys=["inputs_aug"],
                 allow_missing_keys=True,
-                spatial_size=spatial_size,
-                prob=1.0,
-                rotate_range=0.1,
-                shear_range=0.0,
-                translate_range=(0.1, 0.1, 0.1),
-                scale_range=[-0.1, 0.1],
-                padding_mode="zeros"
+                **affine_kwargs
             ))
             transforms_list.append(RandGaussianSmoothd(
                 keys=['inputs_aug'],
@@ -294,9 +265,12 @@ def get_monai_patch_dataset(data_dir, cf, dataset_split_csv, split,
                 sigma_z=[0.5, 1.5]
             ))
             transforms_list.append(ScaleIntensityd(keys=['inputs_aug'], minv=0.0, maxv=1.0))
-            transforms_list.append(ToTensord(keys=['inputs_aug']))
+#             transforms_list.append(ToTensord(keys=['inputs_aug'], allow_missing_keys=False))
+        keys = ['inputs', 'inputs_aug', 'labels'] if return_aug else ['inputs', 'labels']
+#         keys = ['inputs', 'labels']
+
         transforms_list.append(ScaleIntensityd(keys=['inputs'], minv=0.0, maxv=1.0))
-        transforms_list.append(ToTensord(keys=['inputs', 'labels']))
+        transforms_list.append(ToTensord(keys=keys, allow_missing_keys=True))
     else:
         files_df = pd.DataFrame(
             data=[(subj, lp) for subj, lp in zip(subject_ids, flair_paths)],

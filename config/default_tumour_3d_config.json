@@ -16,6 +16,7 @@
   "spatial_crop_roi": "null",
   "sampler": "random",
   "training_aug": 0,
+  "use_boundary_loss": 0,
   "loss": "dice",
   "iterations_adapt": 1000,
   "thssaving": 0.2,
